@@ -990,27 +990,49 @@ Revised status:
   Role-sharing:        ⚠️ INCONCLUSIVE  (metric ceiling from token baseline)
 
 Scientific direction:   ✅ REVIVED — previously declared dead, now confirmed viable
-E-1B (segmentation):   ✅ UNBLOCKED — role likelihoods exist
-E3/E4 (higher gates):  ✅ UNBLOCKED — if E-1B passes
+E-1B (bridge validation):  ✅ MAY START — role likelihoods exist
+E3/E4 (higher gates):      ⏸️ NOT YET RELEASED — wait for E-1B passage
 ```
 
-### 13.7 Do not pursue
+### 13.7 Frozen routes
 
-- **Attention-weighted pooling** in the current form (softmax top-m with learned key).
-  The gradient signal is too weak for meaningful feature selection in this setting.
-  Alternatives (Gumbel-softmax, hard attention, reinforcement learning) may work
-  but are out of scope.
-- **Credit-gated encoder shaping** (E2 series). The Matthew effect from additive bias
-  is a fundamental problem with this approach, not a bug artifact.
-- **Role-sharing as a primary test stream**. Token identity saturates the metric;
-  use same-token-context or delayed-role for meaningful tests.
+- ❄️ **Attention-weighted pooling** — frozen permanently. E1a / E1c archived.
+  Do not repair. Do not investigate further. The gradient signal through softmax
+  top-m attention is fundamentally too weak for this regime.
+- ❄️ **Credit-gated encoder shaping** (E2) — frozen. Matthew effect from additive
+  bias is structural, not a bug artifact.
+- ❄️ **Role-sharing as primary metric** — retired. Token baseline saturated.
 
-### 13.8 Next steps
+### 13.8 Active readout routes
 
-E-1A gate criteria are now partially met. Recommended next experiments:
+- ✅ **Predictive v2 + E0** (mean+linear) — primary. Confirmed working at 50K+ steps.
+- ✅ **Predictive v2 + E1b** (mean+MLP) — secondary. Also working at 50K+.
+- ❌ **Predictive v2 + E1a/E1c** (attention variants) — archived. Do not use.
 
-1. **Run E0 to 200K steps** on delayed-role to confirm dense_CPI crosses zero
-2. **Proceed to E-1B** (sequence segmentation) given that role likelihoods exist
-3. **Investigate why attention fails** if the mechanism is critical for future gates
-4. **E2 variants with alternative shaping** (multiplicative gating instead of additive bias)
-   if encoder shaping is still desired
+### 13.9 Acceptance criteria for E-1A re-verification
+
+| Criterion | Threshold | Notes |
+|-----------|-----------|-------|
+| token_NLL | ≥ 0.20 | Stream must not be saturated |
+| E0 dense_CPI | > +0.05 | Mean+linear at 50K+ steps |
+| E1b dense_CPI | > +0.05 | Mean+MLP at 50K+ steps |
+| role_sharing | > hash baseline | Cross-token role abstraction test |
+
+### 13.10 Final audit verdict and next steps
+
+```
+Verdict:  VALID CORRECTION (bug fixes + corrected experiments)
+Gate:     E-1A PARTIAL PASS
+
+Boundaries:
+  ✅ E-1A PARTIAL PASS  — not FAIL, not NOT SUPPORTED
+  ✅ E0 role separation  — genuine signal (not artifact)
+  ✅ E0/E1b dense_CPI    — positive on same-token-context at 50K+
+  ❌ role-sharing stream — retired as primary judge (saturated)
+  ⏸️ E-1B bridge        — may start (role likelihoods exist)
+  ⏸️ E3/E4              — not released; wait for E-1B
+
+Canonical next step:
+  Enter E-1A-bridge validation → if pass, release E-1B only.
+  E3/E4 remain on hold.
+```

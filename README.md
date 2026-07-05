@@ -11,6 +11,22 @@ by two implementation bugs in the AttentionDecoder (MLP backprop order, extra `/
 on embedding updates) and insufficient training steps (10K), not by a fundamental
 representation failure.
 
+**Verdict boundaries (final audit):**
+- ✅ E-1A: **PARTIAL PASS** (~FAIL / NOT SUPPORTED no longer valid)
+- ✅ E0 embedding_role_separation > 0: **genuine signal** (~artifact designation overturned; 50K/100K dense_CPI confirms role-readable signal)
+- ❌ role-sharing stream: **retired as primary metric** (token baseline saturated; use same-token-context or delayed-role instead)
+- ⏸️ E-1B bridge validation: **may start** (role likelihoods exist)
+- ⏸️ E3/E4: **not yet released** (wait for E-1B passage)
+
+**Frozen: attention-weighted pooling.** Current softmax top-m attention with learned key
+is inert (0.99 mass on base features, correlation ≈ 0). No further repair. Use
+mean pooling for all future readouts.
+
+**Acceptance criteria for re-verification:**
+- token_NLL ≥ 0.20 (streams must not be saturated)
+- E0 / E1b dense_CPI > +0.05
+- role_sharing > hash baseline
+
 ---
 
 ## Complete experimental record
@@ -30,7 +46,7 @@ representation failure.
 | **E1c** `attn+MLP` 50K (fixed) | -0.145 | FAIL | Attn mechanism inert even with fixes |
 | **E2** all variants | — | FAIL | Credit shaping creates Matthew effect |
 
-**Gate E-1A: PARTIAL PASS (corrected). E-1B, E3, E4 may proceed.**
+**Gate E-1A: PARTIAL PASS (corrected). E-1B bridge validation may proceed; E3/E4 wait.**
 
 ---
 
@@ -125,3 +141,6 @@ signal from E0 was genuine evidence of role-differentiated embedding structure.
 simple linear decoder with sufficient training can extract it. The previously declared
 "NOT SUPPORTED" conclusion was an artifact of implementation bugs and insufficient
 training steps, not a genuine representation failure.
+
+**Frozen route: attention-weighted pooling.** E1a / E1c (attention variants) are
+archived. All future readouts use mean pooling only (E0 linear or E1b mean+MLP).
