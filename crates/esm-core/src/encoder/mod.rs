@@ -3,7 +3,7 @@
 //! Module structure:
 //! - `mod.rs`: SparseEncoder trait, EncoderKind, base encoders (hash, competitive, predictive)
 //! - `d::`     Encoder D series (archived experimental; dual-channel, anti-Hebbian, traces)
-//! - `e::`     Encoder E series (current: E0 — dense diagnostic decoder)
+//! - `e::`     Encoder E series (current: E0 — dense decoder, E1 — attention + MLP)
 //!
 //! Encoders must not read `TargetEvent` during `encode`; target information is only used in `adapt`.
 
@@ -17,7 +17,7 @@ use crate::feature::{FeatureId, SparseCode};
 use crate::rng::mix64;
 
 use self::d::EncoderD;
-use self::e::EncoderE0;
+use self::e::{AttentionStep, EncoderE0, EncoderE1a, EncoderE1b, EncoderE1c};
 
 #[derive(Clone, Debug)]
 pub struct DenseUpdateStats {
@@ -31,6 +31,18 @@ pub struct DenseReport {
     pub feature_credits: HashMap<FeatureId, f32>,
     pub weight_norm: f32,
     pub bias_norm: f32,
+    // E1 diagnostic fields (None for non-E1 encoders)
+    pub attention_mass_base: Option<f64>,
+    pub attention_mass_proto: Option<f64>,
+    pub top_credit_1: Option<f64>,
+    pub top_credit_3: Option<f64>,
+    pub top_credit_5: Option<f64>,
+    pub attention_credit_corr: Option<f64>,
+    /// Average NLL when top-1/3/5 attended features are removed (precomputed)
+    pub nll_without_top1: Option<f64>,
+    pub nll_without_top3: Option<f64>,
+    pub nll_without_top5: Option<f64>,
+    pub attention_samples: Option<Vec<AttentionStep>>,
 }
 
 pub trait SparseEncoder {
@@ -53,7 +65,10 @@ pub trait SparseEncoder {
 
 /// Encoder kinds currently in service:
 ///   Hash, Competitive, Predictive — active baselines
-///   E0 — dense diagnostic decoder (current experimental series)
+///   E0 — mean-pooled linear readout (diagnostic)
+///   E1AttnLinear — attention + linear (E1a)
+///   E1MeanMLP    — mean + MLP       (E1b, ablation)
+///   E1AttnMLP    — attention + MLP  (E1c)
 ///
 /// D-series variants are in `encoder::d` but NOT exposed as top-level EncoderKind aliases.
 /// To run a D-series encoder, use `d`, `d-no-trace`, or `d-no-role-proto` explicitly.
@@ -68,8 +83,12 @@ pub enum EncoderKind {
     D,
     DNoTrace,
     DNoRoleProto,
-    /// Current E-series: predictive v2 + dense decoder.
+    /// E-series baselines
     E0,
+    /// E1 series: encoder v2 + multi-mode attention/MLP decoder
+    E1AttnLinear,
+    E1MeanMLP,
+    E1AttnMLP,
 }
 
 impl EncoderKind {
@@ -82,6 +101,9 @@ impl EncoderKind {
             "d-no-trace" | "d_notrace" => Some(Self::DNoTrace),
             "d-no-role-proto" | "d_noroleproto" => Some(Self::DNoRoleProto),
             "e0" | "encoder-e0" => Some(Self::E0),
+            "e1-attn-linear" | "e1a" => Some(Self::E1AttnLinear),
+            "e1-mean-mlp" | "e1b" => Some(Self::E1MeanMLP),
+            "e1-attn-mlp" | "e1c" => Some(Self::E1AttnMLP),
             _ => None,
         }
     }
@@ -127,6 +149,9 @@ pub fn build_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Box<dyn SparseEnc
         EncoderKind::DNoTrace => Box::new(EncoderD::new(cfg, true, false)),
         EncoderKind::DNoRoleProto => Box::new(EncoderD::new(cfg, false, false)),
         EncoderKind::E0 => Box::new(EncoderE0::new(cfg)),
+        EncoderKind::E1AttnLinear => Box::new(EncoderE1a::new(cfg)),
+        EncoderKind::E1MeanMLP => Box::new(EncoderE1b::new(cfg)),
+        EncoderKind::E1AttnMLP => Box::new(EncoderE1c::new(cfg)),
     }
 }
 

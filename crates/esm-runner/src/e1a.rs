@@ -81,6 +81,27 @@ pub fn run_e1a(cfg: E1aConfig) -> E1aReport {
             );
             report.set_embedding_role_separation(sep);
         }
+
+        // E1 attention diagnostics
+        if let Some(_samples) = &dr.attention_samples {
+            let mass_base = dr.attention_mass_base.unwrap_or(0.0);
+            let mass_proto = dr.attention_mass_proto.unwrap_or(0.0);
+            let t1 = dr.top_credit_1.unwrap_or(0.0);
+            let t3 = dr.top_credit_3.unwrap_or(0.0);
+            let t5 = dr.top_credit_5.unwrap_or(0.0);
+            let corr = dr.attention_credit_corr.unwrap_or(0.0);
+
+            let cpi_wo_1 = report.token_nll - dr.nll_without_top1.unwrap_or(report.dense_nll);
+            let cpi_wo_3 = report.token_nll - dr.nll_without_top3.unwrap_or(report.dense_nll);
+            let cpi_wo_5 = report.token_nll - dr.nll_without_top5.unwrap_or(report.dense_nll);
+
+            report.set_e1_diagnostics(
+                mass_base, mass_proto,
+                t1, t3, t5,
+                cpi_wo_1, cpi_wo_3, cpi_wo_5,
+                corr,
+            );
+        }
     }
 
     report

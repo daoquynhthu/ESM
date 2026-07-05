@@ -82,6 +82,16 @@ pub struct E1aReport {
     pub dense_nll: f64,
     pub dense_cpi: f64,
     pub embedding_role_separation: f64,
+    // E1 attention diagnostics
+    pub attention_mass_base: f64,
+    pub attention_mass_proto: f64,
+    pub top_credit_1: f64,
+    pub top_credit_3: f64,
+    pub top_credit_5: f64,
+    pub dense_cpi_without_top1: f64,
+    pub dense_cpi_without_top3: f64,
+    pub dense_cpi_without_top5: f64,
+    pub attention_credit_corr: f64,
 }
 
 impl E1aMetrics {
@@ -199,6 +209,15 @@ impl E1aMetrics {
             dense_nll,
             dense_cpi: if has_dense { token_nll - dense_nll } else { 0.0 },
             embedding_role_separation: 0.0,
+            attention_mass_base: 0.0,
+            attention_mass_proto: 0.0,
+            top_credit_1: 0.0,
+            top_credit_3: 0.0,
+            top_credit_5: 0.0,
+            dense_cpi_without_top1: 0.0,
+            dense_cpi_without_top3: 0.0,
+            dense_cpi_without_top5: 0.0,
+            attention_credit_corr: 0.0,
         }
     }
 
@@ -295,6 +314,29 @@ impl E1aReport {
         self.embedding_role_separation = val;
     }
 
+    pub fn set_e1_diagnostics(
+        &mut self,
+        mass_base: f64,
+        mass_proto: f64,
+        top_c1: f64,
+        top_c3: f64,
+        top_c5: f64,
+        cpi_wo_1: f64,
+        cpi_wo_3: f64,
+        cpi_wo_5: f64,
+        corr: f64,
+    ) {
+        self.attention_mass_base = mass_base;
+        self.attention_mass_proto = mass_proto;
+        self.top_credit_1 = top_c1;
+        self.top_credit_3 = top_c3;
+        self.top_credit_5 = top_c5;
+        self.dense_cpi_without_top1 = cpi_wo_1;
+        self.dense_cpi_without_top3 = cpi_wo_3;
+        self.dense_cpi_without_top5 = cpi_wo_5;
+        self.attention_credit_corr = corr;
+    }
+
     pub fn to_json_pretty(&self) -> String {
         format!(
             concat!(
@@ -316,7 +358,16 @@ impl E1aReport {
                 "  \"unique_features\": {},\n",
                 "  \"dense_nll\": {:.8},\n",
                 "  \"dense_cpi\": {:.8},\n",
-                "  \"embedding_role_separation\": {:.8}\n",
+                "  \"embedding_role_separation\": {:.8},\n",
+                "  \"attention_mass_base\": {:.8},\n",
+                "  \"attention_mass_proto\": {:.8},\n",
+                "  \"top_credit_1\": {:.8},\n",
+                "  \"top_credit_3\": {:.8},\n",
+                "  \"top_credit_5\": {:.8},\n",
+                "  \"dense_cpi_without_top1\": {:.8},\n",
+                "  \"dense_cpi_without_top3\": {:.8},\n",
+                "  \"dense_cpi_without_top5\": {:.8},\n",
+                "  \"attention_credit_corr\": {:.8}\n",
                 "}}"
             ),
             escape_json(&self.encoder),
@@ -336,7 +387,16 @@ impl E1aReport {
             self.unique_features,
             self.dense_nll,
             self.dense_cpi,
-            self.embedding_role_separation
+            self.embedding_role_separation,
+            self.attention_mass_base,
+            self.attention_mass_proto,
+            self.top_credit_1,
+            self.top_credit_3,
+            self.top_credit_5,
+            self.dense_cpi_without_top1,
+            self.dense_cpi_without_top3,
+            self.dense_cpi_without_top5,
+            self.attention_credit_corr
         )
     }
 }

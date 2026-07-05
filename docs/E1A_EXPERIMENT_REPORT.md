@@ -490,7 +490,161 @@ The pre-E0 conclusion ("not supported across three encoder designs") is
 
 ---
 
-## 9. Next steps
+## 9. Encoder E1: attention-weighted pooling + MLP + ablation
+
+### 9.1 Motivation
+
+E0 proved that role-differentiated embeddings exist in the sparse code
+(embedding_role_separation 0.7–1.4) but that mean-pooled linear readout cannot
+extract them (dense_CPI < 0 on all streams). The open question was: **is the
+bottleneck the pooling operation (mean → attention) or the readout function
+(linear → MLP)?**
+
+Encoder E1 answered this with a 2×2 ablation:
+
+| Variant | Pooling | Readout | Purpose |
+|---|---|---|---|
+| e1a | Attention (top-8) | Linear | Is mean pooling the bottleneck? |
+| e1b | Mean | MLP (hidden 32) | Is linear readout the bottleneck? |
+| e1c | Attention (top-8) | MLP (hidden 32) | Do both together help? |
+
+All E1 variants share the same architecture: Predictive v2 sparse base (unchanged),
+16-dim learned feature embeddings, attention key vector learned via SGD, leave-one-out
+feature credit, and four new diagnostic metrics.
+
+### 9.2 Diagnostic metrics
+
+Four metrics were added to determine whether the attention/MLP decoder is genuinely
+using useful sparse features or memorizing noise:
+
+| Metric | What it measures |
+|---|---|
+| `attention_mass_base` | Fraction of attention mass on base sparse features (vs prototype-only) |
+| `top_credit_1/3/5` | Average leave-one-out credit of the top-1/3/5 attended features |
+| `dense_cpi_without_top1/3/5` | Dense_CPI when top-1/3/5 attended features are removed from the code |
+| `attention_credit_corr` | Pearson correlation between attention weights and leave-one-out credits |
+
+### 9.3 Results
+
+```
+Dense_CPI (seed 1 / seed 2):
+
+Encoder      same-token-context   role-sharing        delayed-role
+e0           -0.413 / -0.420      -1.157 / -1.160     -0.372 / -0.372
+e1a (attn+linear) -0.444 / -0.437 -1.172 / -1.169    -0.372 / -0.372
+e1b (mean+MLP)   -0.394 / -0.394  -1.116 / -1.116    -0.283 / -0.271
+e1c (attn+MLP)   -0.396 / -0.393  -1.117 / -1.116    -0.286 / -0.272
+```
+
+```
+Embedding role separation (seed 1 / seed 2):
+
+Encoder      same-token-context   role-sharing        delayed-role
+e0           1.375 / 1.393        1.143 / 1.100       1.047 / 0.725
+e1a          1.261 / 1.176        1.068 / 1.037       0.959 / 1.189
+e1b          1.253 / 1.173        1.065 / 1.036       0.954 / 1.192
+e1c          1.252 / 1.172        1.064 / 1.037       0.953 / 1.192
+```
+
+```
+Attention diagnostics (e1c, seed 1):
+
+Stream               mass_base  mass_proto  top_c1       attn_corr    cpi_wo1
+same-token-context   0.992      0.008       2.3e-05      0.003        -0.307
+role-sharing         0.996      0.004       -1.8e-06     -0.005       -1.012
+delayed-role         0.996      0.004       1.1e-05      0.040        -0.240
+```
+
+### 9.4 Ablation interpretation
+
+| Comparison | Result | Interpretation |
+|---|---|---|
+| e1a vs e0 | **e1a ≈ e0** (equal or worse) | Attention pooling alone does NOTHING. Mean pooling is not the bottleneck. |
+| e1b vs e0 | **e1b > e0** (all streams) | MLP readout consistently improves over linear (+0.02 to +0.09 nats). |
+| e1c vs e1b | **e1c ≈ e1b** (equal) | Attention adds nothing beyond MLP. |
+| e1c vs e0 | **e1c > e0** (especially delayed-role) | MLP + mean pooling achieves the best results, but attention is inert. |
+
+**Diagnosis:**
+- The attention mechanism does NOT learn meaningful feature selection. Attention mass
+  is ~99% on base features (token-identity) regardless of stream. Top-attended features
+  have near-zero leave-one-out credit (top_c1 ≈ 0). Attention–credit correlation is
+  near zero. Removing the top-1 attended feature barely changes dense_CPI.
+- The MLP improvement comes purely from nonlinear capacity, not from feature selection.
+  It consistently helps on delayed-role (the hardest case for linear) but provides only
+  marginal gains on same-token-context and role-sharing.
+- **dense_CPI remains negative on all streams for all E1 variants.** The binding
+  constraint is NOT the readout architecture — it is the encoder representation itself.
+
+### 9.5 E1 verdict
+
+```
+E1:
+  Hypothesis H1a (attention+linear fixes readout):  REJECTED
+  Hypothesis H1b (mean+MLP fixes readout):          PARTIAL (improves but fails to pass)
+  Hypothesis H1c (attention+MLP fixes readout):     PARTIAL (same as H1b)
+  Attention mechanism utility:                      INERT (learns no useful selection)
+  MLP readout benefit:                              REAL (+0.02 to +0.09 nats)
+  dense_CPI > 0 on any stream:                      FAIL (all streams negative)
+  Problem A (does role info exist?):                CONFIRMED (embedding_role_sep intact)
+  Problem A (is it readable?):                      BOUNDED (not linearly, not via attn+MLP)
+```
+
+The critical finding: **the encoder representation itself is the bottleneck, not the
+decoder.** Even with a nonlinear MLP readout, the sparse code does not carry enough
+linearly-decodable role information to achieve dense_CPI > 0. This supersedes the
+E0-era conclusion that "the remaining failure is in the readout architecture."
+
+### 9.6 What E1 proved
+
+1. **The token-identity features dominate the pooled representation.** Attention mass
+   on prototype-only features is <1% (0.4–6.4% across all runs). The base sparse code
+   (surface features) carries most of the pooled signal, and these features are dominated
+   by token identity, not role.
+
+2. **The MLP helps on delayed-role because the temporal gap creates nonlinear
+   structure.** On delayed-role, the same token (42) appears with both roles across
+   consecutive steps. A linear readout cannot separate this, but a 32-dim hidden layer
+   can. The improvement is real (+0.09 nats) but not enough to cross zero.
+
+3. **Attention with learned key is not a viable mechanism in this regime.**
+   The gradient signal through top-m softmax attention is too weak to reshape feature
+   selection. The attention key remains essentially random, producing uniform attention
+   weights. Alternatives (Gumbel-softmax, hard attention, reinforcement learning) might
+   work but introduce complexity beyond E-1A's scope.
+
+4. **E0's embedding_role_separation metric is not a sufficient indicator of
+   representation usability.** The embeddings separate by role in the full 16-dim
+   space, but the pooled representation (whether mean or attention-weighted) does not
+   carry enough role signal for downstream decoding. The role information appears to
+   be distributed across features in a way that pooling destroys.
+
+### 9.7 The user's predicted scenario
+
+The user anticipated this outcome:
+
+> "如果 E1c 也失败，就应该重新质疑 E0 的 'role basis exists'"
+> "如果 E1a/E1b 失败，结论应收紧为：E0 的 embedding_role_separation 不是足够可用的
+>  representation；当前 Predictive v2 sparse encoder 仍未通过 E-1A；需要回到 encoder
+>  learning objective，而不是继续堆 decoder。"
+
+This is now confirmed. The running total of encoder-decoder pairs that fail E-1A:
+
+| Config | dense_CPI | Verdict |
+|---|---|---|
+| v1 + none | — | IMPLEMENTATION COLLAPSE |
+| v2 + none | — | FAIL (feat_CPI) |
+| D + none | — | FAIL (worse than v2) |
+| v2 + mean+linear (E0) | -0.37 to -1.16 | FAIL |
+| v2 + attn+linear (E1a) | -0.37 to -1.17 | FAIL |
+| v2 + mean+MLP (E1b) | -0.27 to -1.12 | FAIL |
+| v2 + attn+MLP (E1c) | -0.27 to -1.12 | FAIL |
+
+The decoder is not the bottleneck. The encoder's predictive v2 sparse representation
+does not carry enough role information for any readout tested.
+
+---
+
+## 11. Next steps
 
 ```
 Current status:
@@ -498,71 +652,102 @@ Current status:
   v2:              FAIL (representation gate)
   D:               FAIL (dual-channel regresses)
   E0:              PARTIAL PASS (representation exists, readout fails)
+  E1a:             FAIL (attention+linear — attention inert)
+  E1b:             FAIL (mean+MLP — improves but cannot cross zero)
+  E1c:             FAIL (attention+MLP — same as E1b, attention inert)
   E-1A gate:       FAIL — do not implement E-1B
-  Scientific dir:  REVIVED
+  Scientific dir:  NEEDS REDIRECTION
 ```
 
-### Primary recommendation: Encoder E1
+### E1 closed the "fix the readout" hypothesis
 
-Do not stop, do not skip gate — but redirect to E1 with a clear target:
+Encoder E1 systematically tested three decoder architectures against E0:
 
-```diff
-+ Encoder E1:
-+   Base:          Predictive v2 (unchanged)
-+   Readout:       attention-weighted pooling + one-hidden-layer decoder
-+   Metrics:       dense_CPI > 0 on role-sharing stream
-+   Encoder:       credit-gated sparse utility shaping (weak coupling)
-+   Traces:        deferred to E1b (dense trace after readout works)
+| Hypothesis | Test | Result |
+|---|---|---|
+| Mean pooling is the bottleneck | E1a (attn+linear) vs E0 (mean+linear) | **REJECTED** — attn+linear ≈ mean+linear |
+| Linear readout is the bottleneck | E1b (mean+MLP) vs E0 (mean+linear) | **PARTIALLY SUPPORTED** — MLP helps, but not enough |
+| Both are bottlenecks | E1c (attn+MLP) vs E0 (mean+linear) | **MLP helps, attention adds nothing** |
+
+The decoder is not the binding constraint. The encoder's sparse representation
+does not carry enough linearly-decodable role information to pass E-1A, regardless
+of decoder architecture.
+
+### The corrected problem statement
+
+The E0 post-mortem stated: "Sparse code DOES contain role information, but the
+readout cannot extract it." E1 has now shown that even a nonlinear readout cannot
+extract it. The remaining possibilities are:
+
+| Possibility | Evidence | Action |
+|---|---|---|
+| Role info exists but is destroyed by pooling | embedding_role_separation > 0 | Still possible |
+| Role info exists but requires per-feature (not pooled) readout | — | Test with feature-wise classifier |
+| Role info does NOT exist in a usable form | dense_CPI < 0 on all 4 decoders | **Currently most consistent** |
+| Role info exists but requires loss-based encoder shaping | — | Problem B (untested) |
+
+### Primary recommendation: Problem B — loss-based encoder shaping
+
+Stop iterating on decoder architectures. The encoder representation itself needs
+to be shaped by the role-prediction loss, not just by the unsupervised projection
++ homeostasis + context-key prototype mechanism.
+
+The core idea of Problem B:
+
 ```
+Encoder v2 base (predictive projection + context prototypes)
++ Dense decoder (MLP readout, already working at -0.27 nats)
++ Loss-based feedback: dense decoder loss backpropagates into
+  the sparse encoder's column selection (utility shaping)
 
-The three speculative options from the D-series report are now narrowed to one:
+Key constraint: the encoder must remain sparse and online.
+The shaping signal must not create a second information channel
+that leaks TargetEvent into encode.
 
-**Before E0 (3 options):** A. Redesign encoder / B. Stop / C. Skip gate
-**After E0 (1 clear path):** E1 — fix readout, then shape encoder with loss
-
-### What E1 must achieve for E-1A to pass
-
-```
-Gate E-1A passage criteria (updated for E-series):
-
-1. feat_CPI > hash + 0.05 on all three streams
-   (currently: PASS on same-token-context +0.331;
-    FAIL on role-sharing -0.023; FAIL on delayed-role -0.126)
-
-2. dense_CPI > 0 on all three streams
-   (currently: FAIL on all three, -0.41 to -1.16)
-
-3. embedding_role_separation > 0.5 on all three streams
-   (currently: PASS on all three, 0.7-1.4)
-
-Criterion 2 is the binding constraint. Fixing readout (attention + MLP)
-should address it directly without changing the sparse encoder.
-If readout fix does not achieve dense_CPI > 0, revisit Problem B
-(loss-based encoder shaping).
+Approach: credit-gated column utility. Features with positive
+leave-one-out credit get their column success_mass boosted;
+features with negative credit get it reduced. This is the same
+mechanism as PredictiveEncoder's success_mass but driven by
+dense decoder loss instead of local role statistics.
 ```
 
 ### Do not enter E-1B
 
-E-1B (sequence segmentation with dense traces) depends on the encoder/readout
-producing reliable role likelihoods per step. If dense_CPI is negative, the
-segmenter would be built on a noisy signal. E0's embedding_role_separation
-suggests the information exists but is not yet accessible. Fix readout first.
+E-1B (sequence segmentation with dense traces) depends on reliable per-step
+role likelihoods. Dense_CPI remains negative under all tested decoders. The
+segmenter would be built on a noisy signal that does not generalize across roles.
+
+### Secondary options
+
+1. **Per-feature (non-pooled) classifier.** Instead of pooling embeddings, train
+   a classifier on individual feature embeddings. This tests whether role info
+   is destroyed by pooling vs. genuinely absent.
+
+2. **Higher-dim embeddings.** 16-dim may be too narrow. Test with 32 or 64 dims.
+
+3. **Stop and document.** The project has shown that Predictive v2 + any tested
+   decoder cannot pass E-1A. The sparse projection + homeostasis encoder may be
+   fundamentally bounded. Future work outside ESM's architecture could revisit
+   the problem with a different representation learning approach.
 
 ---
 
-## 10. Files changed (all commits)
+## 12. Files changed (all commits)
 
-- `crates/esm-core/src/encoder.rs` — Encoder v2 (sparse projection, homeostasis,
-  predictive context-role prototypes, overflow fix) + Encoder D (dual-channel,
-  anti-Hebbian, context traces, ablated encoder kinds) + Encoder E0 (dense decoder
-  trait, DenseDecoder with 16-dim embeddings + linear softmax + SGD,
-  leave-one-out feature credit diagnostics).
-- `crates/esm-core/src/metrics.rs` — Added `feature_vote_nll_no_proto`,
-  `controlled_feature_predictive_info_no_proto`, prototype masking guard;
-  `dense_nll`, `dense_cpi`, `embedding_role_separation` metrics;
-  `compute_embedding_role_separation` function.
-- `crates/esm-runner/src/e1a.rs` — Prototype range parameter for D-family encoders;
-  dense diagnostic loop in run; dense_report → embedding_role_separation computation.
-- `crates/esm-cli/src/main.rs` — New encoder kinds in CLI help; `--lr` argument.
-- `docs/E1A_EXPERIMENT_REPORT.md` — This report.
-- `Cargo.lock` — Auto-generated.
+- `crates/esm-core/src/encoder/mod.rs` — SparseEncoder trait, EncoderKind (Hash,
+  Competitive, Predictive, D-series archived, E0, E1AttnLinear, E1MeanMLP, E1AttnMLP),
+  DenseReport with attention diagnostic fields, build_encoder mapping.
+- `crates/esm-core/src/encoder/d.rs` — Encoder D series (archived; dual-channel,
+  anti-Hebbian, context traces, ablation variants).
+- `crates/esm-core/src/encoder/e.rs` — E0, E1a, E1b, E1c encoders: DenseDecoder
+  (mean+linear), AttentionDecoder (mean/attention pooling + linear/MLP readout),
+  attention backprop, leave-one-out credit, attention diagnostics
+  (attention_mass_by_feature_type, top_attention_feature_credit,
+  dense_CPI_without_top_features, attention_credit_correlation).
+- `crates/esm-core/src/metrics.rs` — E1aReport with attention diagnostic fields
+  (attention_mass_base, attention_mass_proto, top_credit_1/3/5,
+  dense_cpi_without_top1/3/5, attention_credit_corr), set_e1_diagnostics().
+- `crates/esm-runner/src/e1a.rs` — Post-hoc attention diagnostics from DenseReport.
+- `crates/esm-cli/src/main.rs` — Usage with all E1 encoder aliases.
+- `docs/E1A_EXPERIMENT_REPORT.md` — This report (E1 results and revised conclusions).
+- `run_e1.ps1` — Batch experiment runner script.

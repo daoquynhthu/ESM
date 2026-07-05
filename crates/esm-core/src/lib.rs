@@ -10,7 +10,7 @@ pub mod metrics;
 pub mod rng;
 
 pub use encoder::{DenseReport, DenseUpdateStats, EncoderConfig, EncoderKind, SparseEncoder};
-pub use encoder::e::EncoderE0;
+pub use encoder::e::{AttentionStep, EncoderE0, EncoderE1a, EncoderE1b, EncoderE1c};
 pub use event::{InputEvent, TargetEvent};
 pub use feature::{FeatureId, SparseCode};
 pub use metrics::{compute_embedding_role_separation, E1aMetrics, E1aReport};

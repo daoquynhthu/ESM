@@ -3,3 +3,4 @@
 metrics/*.jsonl
 checkpoints/
 .DS_Store
+esm-rs/

@@ -2,9 +2,9 @@
 
 CPU-first, zero-dependency Rust workspace for engineering online sparse encoders that learn latent-role representations beyond token identity.
 
-**Current status:** E-1A gate **FAIL** — but with a revived scientific direction.
+**Current status:** E-1A gate **FAIL** — scientific direction **NEEDS REDIRECTION**.
 
-The final experiment (E0) proved sparse code features DO learn role-differentiated embedding geometry, but the linear mean-pooling readout cannot extract it. Next step is **Encoder E1** with attention-weighted pooling.
+E1 (attention + MLP) proved that the decoder is not the bottleneck. Even a nonlinear readout cannot extract dense_CPI > 0 from Predictive v2's sparse code. The encoder representation itself needs to be shaped by role-prediction loss (Problem B).
 
 ---
 
@@ -15,9 +15,12 @@ The final experiment (E0) proved sparse code features DO learn role-differentiat
 | **v1** `competitive` | FAIL | WTA implementation collapse (32 of 4096 columns active) |
 | **v2** `predictive` | FAIL | Anti-collapse fixed, context split works, cross-token abstraction insufficient |
 | **D** `d-full` | FAIL | Dual-channel surface+role regresses vs v2; traces inert |
-| **E0** `e0` | **PARTIAL PASS** | **Representation existence: PASS** (embedding_role_sep 0.7–1.4). **Linear readability: FAIL** (dense_CPI < 0). Scientific direction revived. |
-| **E-1A gate** | **FAIL** | Do not implement E-1B until readout is fixed |
-| **Next** | **E1** | Attention-weighted pooling + one-hidden-layer decoder → target: `dense_CPI > 0` |
+| **E0** `e0` | PARTIAL PASS | Representation existence: PASS (embedding_role_sep 0.7–1.4). Linear readability: FAIL (dense_CPI < 0). |
+| **E1a** `e1-attn-linear` | FAIL | Attention+linear ≈ mean+linear — attention mechanism is inert |
+| **E1b** `e1-mean-mlp` | FAIL | Mean+MLP improves (+0.09 nats on delayed-role) but cannot cross zero |
+| **E1c** `e1-attn-mlp` | FAIL | Attention+MLP ≈ mean+MLP — MLP helps, attention adds nothing |
+| **E-1A gate** | **FAIL** | Do not implement E-1B |
+| **Next** | **Problem B** | Loss-based encoder utility shaping (credit → column selection) |
 
 ---
 
@@ -30,8 +33,8 @@ crates/
       encoder/
         mod.rs       SparseEncoder trait, EncoderKind, hash/competitive/predictive
         d.rs         D series — archived (dual-channel, anti-Hebbian, traces)
-        e.rs         E series — current (E0: dense diagnostic decoder)
-      metrics.rs     E1aMetrics, dense_CPI, embedding_role_separation
+        e.rs         E series — E0 (dense decoder), E1a/b/c (attention + MLP)
+      metrics.rs     E1aMetrics, dense_CPI, embedding_role_separation, attention diagnostics
       event.rs       InputEvent, TargetEvent (prequential protocol)
       feature.rs     FeatureId, SparseCode (sparse binary codes)
       rng.rs         Deterministic hash-based RNG
@@ -40,7 +43,7 @@ crates/
   esm-tools/         Development utilities
 
 docs/
-  E1A_EXPERIMENT_REPORT.md   Full experimental record (18 runs, all encoder series)
+  E1A_EXPERIMENT_REPORT.md   Full experimental record (42 runs, all encoder series)
   ARCHITECTURE.md            Design constraints and architectural decisions
 ```
 
@@ -52,11 +55,12 @@ docs/
 |---|---|---|---|
 | `HashEncoder` | `hash` / `a` / `control` | `encoder::HashEncoder` | Active baseline |
 | `CompetitiveEncoder` | `competitive` / `b` | `encoder::CompetitiveEncoder` | Active baseline |
-| `PredictiveEncoder` | `predictive` / `c` | `encoder::PredictiveEncoder` | **Current best sparse encoder** |
-| `EncoderD` | `d` / `d-full` / `d-no-trace` / `d-no-role-proto` | `encoder::d::EncoderD` | **Archived** — dual-channel regresses |
-| `EncoderE0` | `e0` / `encoder-e0` | `encoder::e::EncoderE0` | **Active experimental** — dense decoder |
-
-> **Note:** D-series encoders are kept for reproducibility but are archived. Do not use for new experiments. They are in a separate submodule (`encoder::d`) and require explicit opt-in.
+| `PredictiveEncoder` | `predictive` / `c` | `encoder::PredictiveEncoder` | Current best sparse encoder |
+| `EncoderD` | `d` / `d-full` / `d-no-trace` / `d-no-role-proto` | `encoder::d::EncoderD` | **Archived** |
+| `EncoderE0` | `e0` / `encoder-e0` | `encoder::e::EncoderE0` | Active — mean+linear decoder |
+| `EncoderE1a` | `e1a` / `e1-attn-linear` | `encoder::e::EncoderE1a` | Active — attention+linear |
+| `EncoderE1b` | `e1b` / `e1-mean-mlp` | `encoder::e::EncoderE1b` | Active — mean+MLP |
+| `EncoderE1c` | `e1c` / `e1-attn-mlp` | `encoder::e::EncoderE1c` | Active — attention+MLP |
 
 ---
 
@@ -71,49 +75,51 @@ cargo run --release -- run e1a --stream <stream> --encoder <kind> [--steps N] [-
 #   role-sharing         Different tokens share the same latent role
 #   delayed-role         Role signal is temporally delayed
 
-# Encoders (active)
+# Encoders
 #   hash                 Raw token/hash control
 #   predictive           Sparse projection + context-key role prototypes (v2)
-#   e0                   Predictive + 16-dim feature embeddings + linear softmax + SGD
+#   e0                   Predictive + mean-pooled linear decoder
+#   e1a / e1-attn-linear Attention top-8 + linear readout
+#   e1b / e1-mean-mlp    Mean + one-hidden-layer MLP
+#   e1c / e1-attn-mlp    Attention top-8 + one-hidden-layer MLP
 
 # Encoders (archived)
-#   d                    Dual-channel surface+role + anti-Hebbian + traces
-#   d-no-trace           D without context traces
-#   d-no-role-proto      D without role prototypes (surface only)
+#   d / d-no-trace / d-no-role-proto
 
-# Example: run E0 on role-sharing with custom learning rate
-cargo run --release -- run e1a --stream role-sharing --encoder e0 --steps 10000 --lr 0.01
+# Example
+cargo run --release -- run e1a --stream role-sharing --encoder e1c --steps 10000 --lr 0.01
 ```
 
 ---
 
 ## Key results (seed 1 / seed 2)
 
-### Same-token-context
+### Dense_CPI — the binding constraint
 
-| Encoder | feat_CPI | dense_CPI | embedding_role_sep | context_split |
-|---|---|---|---|---|
-| hash | 0.036 / 0.036 | — | — | 0.000 |
-| predictive | **0.331 / 0.330** | — | — | **0.998** |
-| e0 | **0.331 / 0.330** | -0.413 / -0.420 | **1.375 / 1.393** | **0.998** |
+| Encoder | same-token-context | role-sharing | delayed-role |
+|---|---|---|---|
+| hash | 0.000 / 0.000 | 0.000 / 0.000 | 0.000 / 0.000 |
+| e0 (mean+linear) | -0.413 / -0.420 | -1.157 / -1.160 | -0.372 / -0.372 |
+| e1a (attn+linear) | -0.444 / -0.437 | -1.172 / -1.169 | -0.372 / -0.372 |
+| e1b (mean+MLP) | **-0.394 / -0.394** | **-1.116 / -1.116** | **-0.283 / -0.271** |
+| e1c (attn+MLP) | **-0.396 / -0.393** | **-1.117 / -1.116** | **-0.286 / -0.272** |
 
-### Role-sharing (hardest case)
+### Attention diagnostics (E1c, seed 1)
 
-| Encoder | feat_CPI | dense_CPI | embedding_role_sep | role_sharing |
-|---|---|---|---|---|
-| hash | 0.077 / 0.077 | — | — | 0.000 |
-| predictive | -0.023 / -0.023 | — | — | 0.028 |
-| e0 | -0.023 / -0.023 | **-1.157 / -1.160** | **1.143 / 1.100** | 0.028 |
+| Stream | mass_base | mass_proto | top_c1 | attn_corr | cpi_wo1 |
+|---|---|---|---|---|---|
+| same-token-context | 0.992 | 0.008 | 2.3e-05 | 0.003 | -0.307 |
+| role-sharing | 0.996 | 0.004 | -1.8e-06 | -0.005 | -1.012 |
+| delayed-role | 0.996 | 0.004 | 1.1e-05 | 0.040 | -0.240 |
 
-### Delayed-role
+### Embedding role separation
 
-| Encoder | feat_CPI | dense_CPI | embedding_role_sep | context_split |
-|---|---|---|---|---|
-| hash | 0.035 / 0.035 | — | — | 0.000 |
-| predictive | -0.126 / -0.133 | — | — | 0.983 |
-| e0 | -0.126 / -0.133 | **-0.372 / -0.372** | **1.047 / 0.725** | 0.983 |
+| Encoder | same-token-context | role-sharing | delayed-role |
+|---|---|---|---|
+| e0 | 1.375 / 1.393 | 1.143 / 1.100 | 1.047 / 0.725 |
+| e1c | 1.252 / 1.172 | 1.064 / 1.037 | 0.953 / 1.192 |
 
-See `docs/E1A_EXPERIMENT_REPORT.md` for the full 18-experiment matrix and analysis of all encoder series (v1, v2, D, E0).
+See `docs/E1A_EXPERIMENT_REPORT.md` for the full 42-experiment matrix and analysis of all encoder series (v1, v2, D, E0, E1a, E1b, E1c).
 
 ---
 
@@ -127,22 +133,27 @@ See `docs/E1A_EXPERIMENT_REPORT.md` for the full 18-experiment matrix and analys
 - **No async runtime** in the core.
 - **Prequential protocol:** `encode` never sees `TargetEvent`; target is only used in `adapt`.
 - **No batch processing:** fully online, one step at a time.
-- **No MLP/attention/global hidden state** in the sparse encoder (E0's dense decoder is diagnostic only and does not affect encoding).
+- **No MLP/attention/global hidden state** in the sparse encoder (decoder is diagnostic only and does not affect encoding).
 - **E-1A must pass** before ledger/claim/fork/router engineering begins.
 
 ---
 
-## Next canonical experiment: Encoder E1
+## Next step: Problem B — loss-based encoder shaping
 
-Target: `dense_CPI > 0` on role-sharing stream.
+E1 closed the "fix the readout" hypothesis. The decoder is not the bottleneck.
+The next step is to shape the encoder's column selection using loss signal from the dense decoder:
 
 ```
-Encoder E1:
-  Base:           Predictive v2 (unchanged)
-  Readout:        attention-weighted pooling (replaces mean pooling)
-                  + one-hidden-layer dense decoder (hidden_dim=32 or 64)
-  Encoder:        credit-gated sparse utility shaping (weak coupling first)
-  Traces:         deferred to E1b
-```
+Encoder v2 base (predictive projection + context prototypes)
++ Dense decoder (MLP readout, already working at -0.27 nats)
++ Loss-based feedback: dense decoder loss backpropagates into
+  the sparse encoder's column selection (utility shaping)
 
-The binding constraint is readout architecture. With attention pooling, the decoder can learn which active features carry role signal and which are noise — something mean pooling cannot do. If this achieves `dense_CPI > 0`, the encoder itself may not need modification. If not, loss-based credit shaping of sparse selection (Problem B) becomes necessary.
+via: credit-gated column utility. Features with positive
+leave-one-out credit get their column success_mass boosted;
+features with negative credit get it reduced.
+
+Key constraint: the encoder must remain sparse and online.
+The shaping signal must not create a second information channel
+that leaks TargetEvent into encode.
+```
