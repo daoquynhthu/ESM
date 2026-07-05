@@ -1,7 +1,7 @@
 //! Gate E-1A representation quality runner.
 
 use esm_core::encoder::{build_encoder, EncoderConfig, EncoderKind};
-use esm_core::metrics::{E1aMetrics, E1aReport};
+use esm_core::metrics::{compute_embedding_role_separation, E1aMetrics, E1aReport};
 
 use crate::stream::{build_stream, StreamKind};
 
@@ -15,6 +15,7 @@ pub struct E1aConfig {
     pub columns: usize,
     pub sample_limit: usize,
     pub max_roles: usize,
+    pub lr: f32,
 }
 
 impl Default for E1aConfig {
@@ -28,6 +29,7 @@ impl Default for E1aConfig {
             columns: 4096,
             sample_limit: 4096,
             max_roles: 16,
+            lr: 0.01,
         }
     }
 }
@@ -45,6 +47,7 @@ pub fn run_e1a(cfg: E1aConfig) -> E1aReport {
         columns: cfg.columns,
         seed: cfg.seed,
         max_roles: cfg.max_roles,
+        lr: cfg.lr,
         ..EncoderConfig::default()
     };
     let mut encoder = build_encoder(cfg.encoder, enc_cfg);
@@ -56,8 +59,29 @@ pub fn run_e1a(cfg: E1aConfig) -> E1aReport {
         let (input, target) = stream.next_sample();
         let code = encoder.encode(&input);
         metrics.observe_prequential(&input, &target, &code);
+
+        // Dense prediction (prequential: before adapt)
+        if let Some(probs) = encoder.dense_predict_prequential(&code) {
+            metrics.observe_dense_prequential(&target, &probs);
+        }
+
         encoder.adapt(&input, &target, &code);
+        encoder.dense_adapt(&code, &target);
     }
 
-    metrics.report(encoder.name(), stream.name())
+    let mut report = metrics.report(encoder.name(), stream.name());
+
+    // Embedding role separation from learned embeddings
+    if let Some(dr) = encoder.dense_report() {
+        if !dr.feature_embeddings.is_empty() {
+            let sep = compute_embedding_role_separation(
+                &dr.feature_embeddings,
+                metrics.feature_role_counts(),
+                cfg.max_roles,
+            );
+            report.set_embedding_role_separation(sep);
+        }
+    }
+
+    report
 }

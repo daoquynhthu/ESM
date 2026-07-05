@@ -75,6 +75,11 @@ fn run_cmd(args: &[String]) -> Result<(), String> {
                 cfg.sample_limit = parse_usize(value, "sample-limit")?;
                 i += 2;
             }
+            "--lr" => {
+                let value = take_value(args, i)?;
+                cfg.lr = value.parse::<f32>().map_err(|_| format!("invalid lr '{value}'"))?;
+                i += 2;
+            }
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
@@ -100,6 +105,6 @@ fn parse_usize(s: &str, name: &str) -> Result<usize, String> {
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  esm run e1a [--stream same-token-context|role-sharing|delayed-role] \\\n                  [--encoder hash|competitive|predictive|d|d-no-trace|d-no-role-proto] \\\n                  [--steps N] [--seed N]\n\nExamples:\n  esm run e1a --stream same-token-context --encoder hash --steps 10000\n  esm run e1a --stream same-token-context --encoder d --steps 10000\n  esm run e1a --stream delayed-role --encoder d-no-trace --steps 10000"
+        "Usage:\n  esm run e1a [--stream same-token-context|role-sharing|delayed-role] \\\n                  [--encoder hash|competitive|predictive|d|d-no-trace|d-no-role-proto|e0] \\\n                  [--steps N] [--seed N]\n\nExamples:\n  esm run e1a --stream same-token-context --encoder hash --steps 10000\n  esm run e1a --stream same-token-context --encoder d --steps 10000\n  esm run e1a --stream delayed-role --encoder d-no-trace --steps 10000"
     );
 }

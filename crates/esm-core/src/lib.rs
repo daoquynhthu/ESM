@@ -9,7 +9,7 @@ pub mod ids;
 pub mod metrics;
 pub mod rng;
 
-pub use encoder::{EncoderConfig, EncoderKind, SparseEncoder};
+pub use encoder::{DenseReport, DenseUpdateStats, EncoderConfig, EncoderE0, EncoderKind, SparseEncoder};
 pub use event::{InputEvent, TargetEvent};
 pub use feature::{FeatureId, SparseCode};
-pub use metrics::{E1aMetrics, E1aReport};
+pub use metrics::{compute_embedding_role_separation, E1aMetrics, E1aReport};
