@@ -2,7 +2,7 @@
 
 CPU-first, zero-dependency Rust workspace for engineering online sparse encoders that learn latent-role representations beyond token identity.
 
-**Project status: E-1A PARTIAL PASS. E-1B bridge: LEDGER ALONE INSUFFICIENT.**
+**Project status: E-1A PARTIAL PASS. E-1B bridge: LEDGER INSUFFICIENT (random context prevents cross-cycle transfer).**
 
 The hypothesis — "a CPU-first, online, sparse competitive encoder can form latent-role
 representations beyond token identity" — is **PARTIALLY SUPPORTED** (E-1A). The Predictive v2
@@ -11,20 +11,20 @@ by two implementation bugs in the AttentionDecoder (MLP backprop order, extra `/
 on embedding updates) and insufficient training steps (10K), not by a fundamental
 representation failure.
 
-E-1B bridge validation tested whether a **minimal causal ledger** (FIFO ring buffer of
-encoder states, retrospective credit to cue-step features at verify time) can bridge a
-6-step delay between cue and verification. **Result: ledger reinforces cue-step columns
-but hurts verify-step generalization** — cue-step accuracy improved +4.5% (76% → 81%)
-but verify-step accuracy dropped -0.8% (51.9% → 51.1%). Naive retrospective credit
-causes overfitting to cue-specific (token/position) columns, diluting the competitive
-advantage of context-generalizing columns. A smarter ledger is needed — one that credits
-only columns whose inputs generalize across the delay gap.
+E-1B bridge validation tested three ledger approaches across two encoder architectures:
+(1) naive ledger + standard encoder — overfits to cue-specific columns, hurts verify;
+(2) intersection ledger + standard encoder — too few shared columns (~5/16) are outvoted;
+(3) no-mass ledger + context-dominant encoder — ~15/16 columns shared but random context
+prevents cross-cycle transfer. **The core barrier is not ledger design but stream design:
+random per-cycle contexts mean columns fire once and are never reused, making ledger
+accumulation impossible.** A cycling or fixed-context stream is needed for the ledger
+to accumulate meaningful credit across cycles.
 
 **Verdict boundaries (final):**
 - ✅ E-1A: **PARTIAL PASS** (~FAIL / NOT SUPPORTED no longer valid)
 - ✅ E0 embedding_role_separation > 0: **genuine signal** (~artifact designation overturned; 50K/100K dense_CPI confirms role-readable signal)
 - ❌ role-sharing stream: **retired as primary metric** (token baseline saturated; use same-token-context or delayed-role instead)
-- ⏸️ E-1B bridge: **LEDGER ALONE INSUFFICIENT** (needs context-generalizing credit mechanism to pass)
+- ⏸️ E-1B bridge: **LEDGER ALONE INSUFFICIENT** (random context prevents cross-cycle transfer; needs cycling/fixed contexts)
 - ⏸️ E3/E4: **not yet released** (wait for E-1B passage)
 
 **Frozen: attention-weighted pooling.** Current softmax top-m attention with learned key
@@ -54,9 +54,11 @@ mean pooling for all future readouts.
 | **E1c** `attn+MLP` 10K | -0.39 | FAIL | Both bugs |
 | **E1c** `attn+MLP` 50K (fixed) | -0.145 | FAIL | Attn mechanism inert even with fixes |
 | **E2** all variants | — | FAIL | Credit shaping creates Matthew effect |
-| **E-1B** bridge (predictive, 100K, shared context) | — | ⏸️ **LEDGER ALONE INSUFFICIENT** | Ledger helps cue (+4.5%) but hurts verify (-0.8%). Naive retrospective credit overfits to cue-specific columns |
+| **E-1B** bridge (predictive, naive ledger) | — | ⏸️ **INSUFFICIENT** | Ledger helps cue (+4.5%) but hurts verify (-0.8%). Overfits to cue-specific columns |
+| **E-1B** bridge (predictive, intersection ledger) | — | ⏸️ **INSUFFICIENT** | ~5/16 shared columns, 11 non-shared outvote them |
+| **E-1B** bridge (context-predictive, ledger) | — | ⏸️ **INSUFFICIENT** | ~15/16 shared columns, but random context prevents cross-cycle transfer |
 
-**Gate E-1A: PARTIAL PASS (corrected). E-1B bridge: LEDGER ALONE INSUFFICIENT (needs context-generalizing credit mechanism). E3/E4 wait.**
+**Gate E-1A: PARTIAL PASS (corrected). E-1B bridge: LEDGER ALONE INSUFFICIENT (needs cycling/fixed contexts for cross-cycle transfer). E3/E4 wait.**
 
 ---
 
@@ -68,6 +70,7 @@ crates/
     src/
       encoder/
         mod.rs       SparseEncoder trait, EncoderKind, hash/competitive/predictive
+        context.rs   ContextPredictiveEncoder (context-dominant, for E-1B bridge)
         d.rs         D series — archived (dual-channel, anti-Hebbian, traces)
         e.rs         E series — E0/E1a/E1b/E1c/E2a/E2b/E2c (archived experiments)
       ledger.rs      CausalLedger — FIFO ring buffer for E-1B bridge validation
@@ -101,6 +104,7 @@ docs/
 | `EncoderE2a` | `e2a` / `e2-credit-promote` | Archived (Matthew effect) |
 | `EncoderE2b` | `e2b` / `e2-credit-promote-suppress` | Archived (Matthew effect) |
 | `EncoderE2c` | `e2c` / `e2-no-loo` | Archived (catastrophic collapse) |
+| `ContextPredictiveEncoder` | `context` / `context-predictive` / `ctx` | Active — context-dominant variant for E-1B bridge (85% context weight) |
 
 ---
 
@@ -111,9 +115,11 @@ docs/
 cargo run --release -- run e1a --stream <stream> --encoder <kind> [--steps N] [--seed N] [--lr F]
 
 # Run E-1B bridge validation
-cargo run --release -- run e1b --encoder predictive [--steps N] [--seed N] [--ledger-gap N]
+cargo run --release -- run e1b --encoder predictive|context [--steps N] [--seed N] [--ledger-gap N]
 
-# Streams: same-token-context | role-sharing | delayed-role
+# Streams: same-token-context | role-sharing | delayed-role | delayed-cue-verify-only
+
+# Encoders (new): context / context-predictive / ctx — context-dominant variant
 
 # Recommended: use 50000+ steps for dense decoder convergence
 # E0 and E1b achieve dense_CPI > 0 on same-token-context at 50K steps.
@@ -161,39 +167,55 @@ archived. All future readouts use mean pooling only (E0 linear or E1b mean+MLP).
 
 ## E-1B bridge validation
 
-E-1B tests whether the Predictive v2 sparse encoder can learn **delayed cue → role
-associations** spanning multiple steps. The delayed-cue stream separates cue and
-verification by 5 filler steps. Cue and verify share a per-cycle context token so that
-some columns fire at both steps.
+E-1B tests whether a **causal ledger** can bridge delayed cue→role associations.
+The stream separates cue and verification by 5 filler steps. Three approaches tried:
 
-### Stream design
+### Approach 1: Naive ledger + standard encoder (predictive)
 
-- **Phase 0 (cue):** token 100/101 (role-signaling), shared context per cycle
-- **Phases 1-4 (fillers):** random tokens, random context
-- **Phase 5 (verify):** token 300, same context as cue
-
-### Baseline result (no ledger, 100K steps)
-
-| Metric | Value | Interpretation |
-|---|---|---|
-| Cue-step voting accuracy | 76.3% | Encoder learns role from cue step (shared context) |
-| Verify-step voting accuracy | **51.9%** | Slightly above random — some columns generalize from cue to verify via shared context |
-
-### With minimal causal ledger (100K steps, gap=5)
+Reinforces ALL cue-step columns at verify time. Problem: most cue columns are
+token/position-specific and don't fire at verify. Their success_mass boost dilutes
+generalizing columns.
 
 | Metric | Baseline | With ledger | Delta |
 |---|---|---|---|
-| Cue-step voting accuracy | 76.3% | 80.8% | **+4.5%** ✅ |
-| Verify-step voting accuracy | 51.9% | 51.1% | **-0.8%** ❌ |
+| Cue-step accuracy | 76.3% | 80.8% | +4.5% ✅ |
+| Verify-step accuracy | 51.9% | 51.1% | -0.8% ❌ |
+
+### Approach 2: Intersection ledger + standard encoder
+
+Only credits columns that fire at BOTH cue AND verify (~5.3 of 16). Still hurts
+because 11 non-shared columns outvote the 5 shared ones.
+
+| Metric | Baseline | Intersection ledger | Delta |
+|---|---|---|---|
+| Verify-step accuracy | 51.9% | 51.5% | -0.4% ❌ |
+
+### Approach 3: Context-dominant encoder (`context-predictive`) + no-mass ledger
+
+New encoder with context-weighted sketch terms (context ~85% of column score).
+Achieves ~15/16 shared columns between cue and verify. Ledger uses unconditional
+role-count addition (no success_mass to avoid cross-context pollution).
+
+| Metric | Baseline | Ledger (counts only) | Delta |
+|---|---|---|---|
+| Shared columns | ~15/16 | ~15/16 | ✅ |
+| Verify-step accuracy | 54.7% | 53.7% | -1.0% ❌ |
 
 ### Key finding
 
-The ledger reinforces **all** cue-step columns, including those that are token-specific
-(e.g., token 100/101) or position-specific (position_mod=0). These columns do not fire at
-verify step (different token, different position). Their boosted success_mass dilutes the
-competitive advantage of context-generalizing columns (which fire at both cue and verify),
-reducing verify-step accuracy.
+The context-dominant encoder successfully maximizes cue→verify column overlap (~15/16).
+But the ledger still can't help because **each cycle uses a random context** — the
+columns that fire in one cycle never fire again (different context next cycle). The
+ledger's role-count additions are wasted on columns that are never reused.
 
-**Conclusion: Naive retrospective credit overfits to cue-step columns and hurts
-generalization.** A smarter ledger is needed — one that credits only columns whose inputs
-generalize across the delay gap (e.g., restricting credit to context-derived features).
+**Root cause: random context prevents cross-cycle transfer.** The ledger can only
+accumulate signal if the same columns fire across multiple cycles. A fixed or cycling
+context design is needed for the ledger to accumulate meaningful credit.
+
+### New encoder: `ContextPredictiveEncoder`
+
+CLI alias: `context` / `context-predictive` / `ctx`. Context-dominant sketch terms:
+- context_token: weight 30, fanout 20 (was 9/12)
+- token XOR context: weight 8, fanout 12 (was 10/12)
+- All other terms: reduced to weight 1-2, fanout 2-4
+- Step XOR position: removed entirely

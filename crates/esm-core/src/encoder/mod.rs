@@ -7,6 +7,7 @@
 //!
 //! Encoders must not read `TargetEvent` during `encode`; target information is only used in `adapt`.
 
+pub mod context;
 pub mod d;
 pub mod e;
 
@@ -111,6 +112,8 @@ pub enum EncoderKind {
     E2CreditPromote,
     E2CreditPromoteSuppress,
     E2NoLoo,
+    /// Context-dominant predictive encoder for E-1B bridge
+    ContextPredictive,
 }
 
 impl EncoderKind {
@@ -129,6 +132,7 @@ impl EncoderKind {
             "e2-credit-promote" | "e2a" => Some(Self::E2CreditPromote),
             "e2-credit-promote-suppress" | "e2b" => Some(Self::E2CreditPromoteSuppress),
             "e2-no-loo" | "e2c" => Some(Self::E2NoLoo),
+            "context-predictive" | "context" | "ctx" => Some(Self::ContextPredictive),
             _ => None,
         }
     }
@@ -180,6 +184,9 @@ pub fn build_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Box<dyn SparseEnc
         EncoderKind::E2CreditPromote => Box::new(EncoderE2a::new(cfg)),
         EncoderKind::E2CreditPromoteSuppress => Box::new(EncoderE2b::new(cfg)),
         EncoderKind::E2NoLoo => Box::new(EncoderE2c::new(cfg)),
+        EncoderKind::ContextPredictive => {
+            Box::new(context::ContextPredictiveEncoder::new(cfg))
+        }
     }
 }
 
@@ -470,6 +477,8 @@ impl SparseEncoder for PredictiveEncoder {
         _cue_step: u64,
         verified_role: usize,
     ) {
+        // Unconditionally add role counts to cue-step features.
+        // No success_mass modification (causes cross-context pollution).
         for fid in cue_features {
             if fid.0 < self.base.feature_offset {
                 continue;
@@ -478,19 +487,8 @@ impl SparseEncoder for PredictiveEncoder {
             if idx >= self.role_counts_by_column.len() {
                 continue;
             }
-            // Assign role counts retroactively (like adapt() at the past step)
             if let Some(counts) = self.role_counts_by_column.get_mut(idx) {
                 counts[verified_role] = counts[verified_role].saturating_add(1);
-
-                // Update success_mass based on whether this column's
-                // majority role now matches the verified role
-                if let Some((dominant, best, second)) = Self::dominant_role(counts) {
-                    if dominant == verified_role && best >= second.saturating_add(2) {
-                        if let Some(col) = self.base.columns.get_mut(idx) {
-                            col.success_mass = (col.success_mass + 0.25).min(50.0);
-                        }
-                    }
-                }
             }
         }
     }

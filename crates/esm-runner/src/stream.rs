@@ -9,6 +9,7 @@ pub enum StreamKind {
     RoleSharing,
     DelayedRole,
     DelayedCue,
+    DelayedCueVerifyOnly,
 }
 
 impl StreamKind {
@@ -18,6 +19,7 @@ impl StreamKind {
             "role-sharing" | "role_sharing" | "sharing" => Some(Self::RoleSharing),
             "delayed-role" | "delayed_role" | "delayed" => Some(Self::DelayedRole),
             "delayed-cue" | "delayed_cue" | "cue" => Some(Self::DelayedCue),
+            "delayed-cue-verify-only" | "verify-only" | "verifyonly" => Some(Self::DelayedCueVerifyOnly),
             _ => None,
         }
     }
@@ -28,6 +30,7 @@ impl StreamKind {
             Self::RoleSharing => "role-sharing",
             Self::DelayedRole => "delayed-role",
             Self::DelayedCue => "delayed-cue",
+            Self::DelayedCueVerifyOnly => "delayed-cue-verify-only",
         }
     }
 }
@@ -43,6 +46,7 @@ pub fn build_stream(kind: StreamKind, seed: u64) -> Box<dyn SyntheticStream> {
         StreamKind::RoleSharing => Box::new(RoleSharingStream::new(seed)),
         StreamKind::DelayedRole => Box::new(DelayedRoleStream::new(seed)),
         StreamKind::DelayedCue => Box::new(DelayedCueStream::new(seed)),
+        StreamKind::DelayedCueVerifyOnly => Box::new(DelayedCueVerifyOnlyStream::new(seed)),
     }
 }
 
@@ -221,6 +225,68 @@ impl SyntheticStream for DelayedCueStream {
         };
         let target = TargetEvent {
             latent_role: self.current_role,
+            next_token: 0,
+        };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+
+/// Delayed-cue stream where the role is ONLY revealed at verify step (phase 5).
+/// At cue and filler steps, the role is random noise (no useful information).
+/// This creates a genuine delayed credit assignment problem: the encoder must
+/// learn the cue→role association through retrospective ledger credit.
+struct DelayedCueVerifyOnlyStream {
+    step: u64,
+    prev_token: u32,
+    current_role: u32,
+    cycle_context: u32,
+    rng: XorShift64,
+}
+
+impl DelayedCueVerifyOnlyStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, current_role: 0, cycle_context: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for DelayedCueVerifyOnlyStream {
+    fn name(&self) -> &'static str { "delayed-cue-verify-only" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let phase = self.step % 6;
+        if phase == 0 {
+            self.current_role = self.rng.next_usize(2) as u32;
+            self.cycle_context = self.rng.next_usize(4096) as u32;
+        }
+
+        let token = match phase {
+            0 => 100 + self.current_role, // 100 for role 0, 101 for role 1
+            1 | 2 | 3 | 4 => 200 + self.rng.next_usize(8) as u32,
+            _ => 300, // verification
+        };
+
+        let context_token = if phase == 0 || phase == 5 {
+            20000 + self.cycle_context
+        } else {
+            self.rng.next_usize(1024) as u32
+        };
+
+        // Role is ONLY revealed at verify step.
+        // At cue/filler steps: random noise role (50/50).
+        let reveal_role = phase == 5;
+        let role = if reveal_role { self.current_role } else { self.rng.next_usize(2) as u32 };
+
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token,
+            position_mod: phase as u32,
+        };
+        let target = TargetEvent {
+            latent_role: role,
             next_token: 0,
         };
         self.prev_token = token;
