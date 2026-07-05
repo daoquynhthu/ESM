@@ -361,129 +361,192 @@ explanations:
 ### 7.4 E0 verdict
 
 ```
-Problem A (does sparse code contain role information?):
-  embedding_role_separation: ✅ POSITIVE on all streams
-  dense_CPI:                  ❌ NEGATIVE on all streams
-
-Interpretation: sparse code contains role-differentiated information
-(embedding space separates by role), but the mean-pooled linear readout
-cannot extract it. Problem A is PARTIALLY answered: information exists
-but is not linearly readable via mean pooling.
-
-Proceed to E1? Only if we accept a nonlinear/attentive readout.
+Representation existence (embedding_role_separation > 0):   ✅ PASS
+Linear readability          (dense_CPI > 0):                ❌ FAIL
+Original E-1A gate:                                         ❌ FAIL
+Scientific direction:                                       ✅ REVIVED
 ```
 
-This partially confirms and partially challenges the user's expected result:
+```
+Sub-verdict per stream:
 
-- ✅ `embedding_role_separation > 0`: the sparse encoder IS forming a role basis
-- ❌ `dense_CPI < 0`: the linear readout cannot extract it
-- The `role-sharing` stream shows the strongest dense_CPI deficit (-1.16),
-  confirming that cross-token role generalization is the hardest case
-- `delayed-role` dense_CPI (-0.37) is less negative than role-sharing,
-  suggesting the temporal gap is less problematic than cross-token abstraction
+                embed_role_sep    dense_CPI    verdict
+same-token-context    1.38           -0.41     info exists, linear readout fails
+role-sharing          1.12           -1.16     info exists, hardest case
+delayed-role          0.89           -0.37     info exists, temporal gap not main issue
+```
+
+**What E0 proved:**
+- Sparse code features learn clearly differentiated embeddings per latent role.
+- The role geometry exists independent of readout — it is a property of the encoder's
+  learned representations, not an artifact of the decoding architecture.
+- This rules out the worst-case scenario: the sparse code is not a random projection.
+
+**What E0 did NOT prove:**
+- The mean-pooled linear readout cannot extract role information above the
+  token-frequency baseline (dense_CPI < 0 on all streams).
+- Whether a more powerful readout (attention, MLP) would succeed remains open.
+- Whether loss-based credit shaping of the sparse encoder would improve representations
+  (Problem B) is entirely untouched.
+
+**Eliminated explanations:**
+- ❌ "Sparse code is random / contains no role structure" — falsified by E0
+- ❌ "Embedding space cannot separate roles" — falsified by E0
+- ✅ "Mean-pooling dilutes role signal across active features" — still possible
+- ✅ "16-dim embedding too narrow for linear separation" — still possible
+- ✅ "SGD underfitting" — still possible
+
+### 7.5 Recommended next experiment
+
+The strongest next step is **Encoder E1**:
+
+```
+Encoder E1 =
+  Predictive v2 sparse base (unchanged)
+  + learned feature embeddings (16-dim or 32-dim)
+  + attention-weighted pooling (replaces mean pooling)
+  + one-hidden-layer dense decoder (small MLP, hidden_dim=32 or 64)
+  + prequential dense_CPI as primary metric
+  + leave-one-out feature credit
+  + credit-gated sparse utility shaping (weak coupling first)
+```
+
+E1's target is unambiguous: make `dense_CPI > 0` on **role-sharing** stream.
+If the readout architecture is the bottleneck, attention pooling + one hidden
+layer should unlock the existing embedding geometry.
 
 ---
 
 ## 8. Final Gate E-1A verdict
 
-### FAIL — but with refined scientific diagnosis
+### FAIL — but the diagnosis has shifted meaningfully
 
 ```
-E-1A-v2:
-  Anti-collapse:             PASS
-  Context differentiation:   PASS
-  Cross-token role abstraction: FAIL  (feat_CPI insufficient)
-  Overall E-1A:              FAIL
+v1:              FAIL — WTA collapse (implementation defect)
+v2:              FAIL — anti-collapse fixed, context split works,
+                         cross-token abstraction insufficient
+D:               FAIL — dual-channel regresses, traces inert
+E0:              PARTIAL PASS — representation existence: PASS,
+                                 linear readability: FAIL
+
+Original E-1A gate:      FAIL
+Scientific direction:    REVIVED  (not "not supported", not "passed")
+Do not implement E-1B:   ✅ confirmed
 ```
 
-```
-E-1A-D:
-  Anti-collapse:             PASS
-  Context differentiation:   PASS
-  Cross-token role abstraction: FAIL  (worse than v2)
-  Traces:                    FAIL  (no measurable effect)
-  Overall E-1A:              FAIL
-```
+### What changed from D-series
 
-```
-E-1A-E0:
-  Sparse code unchanged:     v2 encoding identical
-  embedding_role_separation: PASS  (0.7-1.4 on all streams)
-  dense_CPI:                 FAIL  (negative on all streams)
-  Problem A diagnosis:       PARTIAL — role info exists but not linearly readable
-  Proceed to E1:             Only with improved readout architecture
-```
+Before E0, the working hypothesis was that the sparse encoder failed to form
+any meaningful role representations. E0 disproves that. The encoder DOES form
+role-differentiated embeddings (0.7-1.4 cosine separation between role centroids).
+The failure is now localized to the **readout** — the mean-pooled linear decoder
+cannot extract this structure.
 
-### Key findings update (including E0)
+This is a genuine advance:
+- D-series: role_sharing ~0.001 → no cross-token role abstraction detectable
+- E0: embedding_role_separation 0.7-1.4 → role abstraction exists in embedding space
+- The open question shifts from "does role information exist?" to "how do we read it?"
 
-1. **E0 embedding_role_separation is the strongest positive result (0.7–1.4).**
-   For the first time, we have direct evidence that the sparse code features
-   learn differentiated representations across latent roles. This was invisible
-   to feat_CPI because featur-vote NLL only captures pairwise empirical
-   frequencies, not learned embedding geometry.
+### Key findings
+
+1. **E0's embedding_role_separation (0.7–1.4) is the strongest positive signal
+   in the entire E-1A campaign.** It proves sparse features form distinct
+   representations per latent role — something feat_CPI (which only captures
+   pairwise empirical frequencies) could not detect.
 
 2. **feat_CPI remains the best sparse-code metric** (predictive v2: +0.331 on
-   same-token-context), but it misses the embedding-level structure that E0's
-   dense decoder reveals.
+   same-token-context), but it systematically undercounts representation quality
+   compared to learned embedding geometry.
 
-3. **Dense CPI is universally negative** (-0.37 to -1.16), confirming that
-   mean-pooled linear readout is inadequate for role extraction. This does not
-   falsify the hypothesis; it only constrains the readout architecture needed.
+3. **Dense CPI is universally negative** (-0.37 to -1.16), confirming mean-pooled
+   linear readout is inadequate. This does NOT falsify the hypothesis; it only
+   constrains the readout architecture needed.
 
 4. **Predictive v2's context-role prototype features remain useful** — they
-   contribute reliable role signal visible in both feat_CPI and the shared
-   encoding with e0.
+   contribute reliable role signal visible in feat_CPI and shared encoding with e0.
 
-5. **Encoder D and its variants should be retired.** The dual-channel design
-   regresses on all metrics vs. predictive v2, and traces have zero effect.
+5. **Encoder D variants should be retired.** Dual-channel regresses on all metrics
+   vs. predictive v2; traces have zero effect; anti-Hebbian is inert.
 
 ### Scientific conclusion
 
 The original hypothesis — "a CPU-first, online, sparse competitive encoder can form
 latent-role representations beyond token identity" — is **PARTIALLY supported**.
-The sparse encoder does form role-differentiated representations (proven by E0's
-embedding_role_separation). However, the representation is not linearly readable
-via mean pooling (negative dense_CPI), and the feat_CPI signal is below the
-required threshold.
 
-Whether full E-1A passage requires:
-- A better decoder (nonlinear readout → improves dense_CPI but doesn't fix encoder)
-- A better encoder (loss-based shaping → Problem B, needs E1)
-- Or both
+| Question | Answer | Evidence |
+|---|---|---|
+| Does the sparse code contain role-differentiated structure? | **YES** | embedding_role_separation 0.7–1.4 |
+| Is this structure linearly readable via mean pooling? | **NO** | dense_CPI negative on all streams |
+| Can a better readout extract it? | **UNKNOWN** | not tested |
+| Can loss-based credit shape the encoder further? | **UNKNOWN** | not tested (E1's job) |
 
-remains undetermined. The scientific value of E0 is that it **rules out the worst-case
-scenario**: the sparse code is not a random projection; it genuinely differentiates
-roles in the learned embedding space.
+The pre-E0 conclusion ("not supported across three encoder designs") is
+**superseded**. The corrected conclusion is:
+
+> The sparse projection + homeostasis mechanism DOES produce role-differentiated
+> embeddings. The remaining failure is in the readout architecture, not the encoder
+> representation. E-1A still fails because the Gate criterion requires a working
+> decoder, but the scientific direction is revived.
 
 ---
 
 ## 9. Next steps
 
 ```
-E-1A status:     FAIL (do not implement E-1B as currently defined)
-v1:              FAIL (implementation collapse)
-v2:              FAIL (representation gate)
-D:               FAIL (dual-channel regresses)
-E0:              PARTIAL — role-basis exists but not readable via linear readout
+Current status:
+  v1:              FAIL (implementation collapse)
+  v2:              FAIL (representation gate)
+  D:               FAIL (dual-channel regresses)
+  E0:              PARTIAL PASS (representation exists, readout fails)
+  E-1A gate:       FAIL — do not implement E-1B
+  Scientific dir:  REVIVED
 ```
 
-Given the E0 partial-positive result, the project has three refined options:
+### Primary recommendation: Encoder E1
 
-**A. E1-rollup: address dense_CPI deficit first, then shape encoder with loss.**
-   Implement a nonlinear/attentive dense readout that replaces mean pooling.
-   If dense_CPI becomes positive, proceed to E1 with loss-based credit shaping
-   of the sparse encoder. This is the most technically conservative path.
+Do not stop, do not skip gate — but redirect to E1 with a clear target:
 
-**B. Accept the partial result, document, and stop.** The sparse encoder does
-   learn role-differentiated features, but the representation quality may be
-   fundamentally bounded by the projection + homeostasis mechanism. Future
-   work outside ESM's current architecture might build on this finding.
+```diff
++ Encoder E1:
++   Base:          Predictive v2 (unchanged)
++   Readout:       attention-weighted pooling + one-hidden-layer decoder
++   Metrics:       dense_CPI > 0 on role-sharing stream
++   Encoder:       credit-gated sparse utility shaping (weak coupling)
++   Traces:        deferred to E1b (dense trace after readout works)
+```
 
-**C. Skip to E2-E4 with the current encoder.** If the sparse code carries
-   sufficient information for higher-level operations (sequence segmentation,
-   trace binding, etc.), the encoder may be adequate even though the readout
-   needs improvement. E0 showed that information IS present; E1-E4 might
-   succeed with better decoders even without better encoders.
+The three speculative options from the D-series report are now narrowed to one:
+
+**Before E0 (3 options):** A. Redesign encoder / B. Stop / C. Skip gate
+**After E0 (1 clear path):** E1 — fix readout, then shape encoder with loss
+
+### What E1 must achieve for E-1A to pass
+
+```
+Gate E-1A passage criteria (updated for E-series):
+
+1. feat_CPI > hash + 0.05 on all three streams
+   (currently: PASS on same-token-context +0.331;
+    FAIL on role-sharing -0.023; FAIL on delayed-role -0.126)
+
+2. dense_CPI > 0 on all three streams
+   (currently: FAIL on all three, -0.41 to -1.16)
+
+3. embedding_role_separation > 0.5 on all three streams
+   (currently: PASS on all three, 0.7-1.4)
+
+Criterion 2 is the binding constraint. Fixing readout (attention + MLP)
+should address it directly without changing the sparse encoder.
+If readout fix does not achieve dense_CPI > 0, revisit Problem B
+(loss-based encoder shaping).
+```
+
+### Do not enter E-1B
+
+E-1B (sequence segmentation with dense traces) depends on the encoder/readout
+producing reliable role likelihoods per step. If dense_CPI is negative, the
+segmenter would be built on a noisy signal. E0's embedding_role_separation
+suggests the information exists but is not yet accessible. Fix readout first.
 
 ---
 
