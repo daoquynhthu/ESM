@@ -2,25 +2,28 @@
 
 CPU-first, zero-dependency Rust workspace for engineering online sparse encoders that learn latent-role representations beyond token identity.
 
-**Current status:** E-1A gate **FAIL** — scientific direction **NEEDS REDIRECTION**.
+**Project status: E-1A FAILED after 10 independent configurations.**
 
-E1 (attention + MLP) proved that the decoder is not the bottleneck. Even a nonlinear readout cannot extract dense_CPI > 0 from Predictive v2's sparse code. The encoder representation itself needs to be shaped by role-prediction loss (Problem B).
+The hypothesis is **NOT SUPPORTED**. The Predictive v2 sparse encoder learns token-frequency features, not role features. Neither advanced decoders (attention, MLP) nor loss-based encoder shaping (credit bias) can extract role information that was never encoded in the sparse code.
 
 ---
 
-## Project stage
+## Complete experimental record
 
-| Stage | Verdict | Summary |
-|---|---|---|
-| **v1** `competitive` | FAIL | WTA implementation collapse (32 of 4096 columns active) |
-| **v2** `predictive` | FAIL | Anti-collapse fixed, context split works, cross-token abstraction insufficient |
-| **D** `d-full` | FAIL | Dual-channel surface+role regresses vs v2; traces inert |
-| **E0** `e0` | PARTIAL PASS | Representation existence: PASS (embedding_role_sep 0.7–1.4). Linear readability: FAIL (dense_CPI < 0). |
-| **E1a** `e1-attn-linear` | FAIL | Attention+linear ≈ mean+linear — attention mechanism is inert |
-| **E1b** `e1-mean-mlp` | FAIL | Mean+MLP improves (+0.09 nats on delayed-role) but cannot cross zero |
-| **E1c** `e1-attn-mlp` | FAIL | Attention+MLP ≈ mean+MLP — MLP helps, attention adds nothing |
-| **E-1A gate** | **FAIL** | Do not implement E-1B |
-| **Next** | **Problem B** | Loss-based encoder utility shaping (credit → column selection) |
+| Experiment | dense_CPI | Verdict | Failure mode |
+|---|---|---|---|
+| **v1** `competitive` | — | FAIL | WTA collapse (32 of 4096 features) |
+| **v2** `predictive` | — | FAIL | No cross-token role abstraction |
+| **D** `d-full` | — | FAIL | Dual-channel regresses vs v2 |
+| **E0** `mean+linear` | -1.16 to -0.37 | FAIL | Linear readout cannot extract role |
+| **E1a** `attn+linear` | -1.17 to -0.37 | FAIL | Attention mechanism inert |
+| **E1b** `mean+MLP` | -1.12 to -0.27 | FAIL | MLP helps (+0.09) but can't cross zero |
+| **E1c** `attn+MLP` | -1.12 to -0.27 | FAIL | Attention inert, MLP not enough |
+| **E2a** `credit-promote` | -1.12 to -0.27 | FAIL | Matthew effect, hurts feat_CPI |
+| **E2b** `promote+suppress` | -1.12 to -0.27 | FAIL | Same |
+| **E2c** `no-loo uniform` | -1.12 to -0.27 | FAIL | Catastrophic collapse (159 features) |
+
+**Gate E-1A: FAIL. Do not implement E-1B, E3, or E4.**
 
 ---
 
@@ -33,8 +36,8 @@ crates/
       encoder/
         mod.rs       SparseEncoder trait, EncoderKind, hash/competitive/predictive
         d.rs         D series — archived (dual-channel, anti-Hebbian, traces)
-        e.rs         E series — E0 (dense decoder), E1a/b/c (attention + MLP)
-      metrics.rs     E1aMetrics, dense_CPI, embedding_role_separation, attention diagnostics
+        e.rs         E series — E0/E1a/E1b/E1c/E2a/E2b/E2c (archived experiments)
+      metrics.rs     E1aMetrics, E1aReport, dense_CPI, embedding_role_separation
       event.rs       InputEvent, TargetEvent (prequential protocol)
       feature.rs     FeatureId, SparseCode (sparse binary codes)
       rng.rs         Deterministic hash-based RNG
@@ -43,83 +46,40 @@ crates/
   esm-tools/         Development utilities
 
 docs/
-  E1A_EXPERIMENT_REPORT.md   Full experimental record (42 runs, all encoder series)
+  E1A_EXPERIMENT_REPORT.md   Complete experimental record (v1/v2/D/E0/E1/E2)
   ARCHITECTURE.md            Design constraints and architectural decisions
 ```
 
 ---
 
-## Encoder series
+## Encoder series (all archived)
 
-| Kind | CLI alias | Location | Status |
-|---|---|---|---|
-| `HashEncoder` | `hash` / `a` / `control` | `encoder::HashEncoder` | Active baseline |
-| `CompetitiveEncoder` | `competitive` / `b` | `encoder::CompetitiveEncoder` | Active baseline |
-| `PredictiveEncoder` | `predictive` / `c` | `encoder::PredictiveEncoder` | Current best sparse encoder |
-| `EncoderD` | `d` / `d-full` / `d-no-trace` / `d-no-role-proto` | `encoder::d::EncoderD` | **Archived** |
-| `EncoderE0` | `e0` / `encoder-e0` | `encoder::e::EncoderE0` | Active — mean+linear decoder |
-| `EncoderE1a` | `e1a` / `e1-attn-linear` | `encoder::e::EncoderE1a` | Active — attention+linear |
-| `EncoderE1b` | `e1b` / `e1-mean-mlp` | `encoder::e::EncoderE1b` | Active — mean+MLP |
-| `EncoderE1c` | `e1c` / `e1-attn-mlp` | `encoder::e::EncoderE1c` | Active — attention+MLP |
+| Kind | CLI alias | Status |
+|---|---|---|
+| `HashEncoder` | `hash` | Baseline control |
+| `CompetitiveEncoder` | `competitive` | Archived (WTA collapse) |
+| `PredictiveEncoder` | `predictive` | Archived (no role abstraction) |
+| `EncoderD` | `d` / `d-no-trace` / `d-no-role-proto` | Archived (regresses vs v2) |
+| `EncoderE0` | `e0` | Archived (linear readout fails) |
+| `EncoderE1a` | `e1a` / `e1-attn-linear` | Archived (attention inert) |
+| `EncoderE1b` | `e1b` / `e1-mean-mlp` | Archived (MLP not enough) |
+| `EncoderE1c` | `e1c` / `e1-attn-mlp` | Archived (same) |
+| `EncoderE2a` | `e2a` / `e2-credit-promote` | Archived (Matthew effect) |
+| `EncoderE2b` | `e2b` / `e2-credit-promote-suppress` | Archived (Matthew effect) |
+| `EncoderE2c` | `e2c` / `e2-no-loo` | Archived (catastrophic collapse) |
 
 ---
 
 ## CLI usage
 
 ```bash
-# Run a single experiment (prints JSON report to stdout)
+# Run any experiment (archived encoders still runnable for reproducibility)
 cargo run --release -- run e1a --stream <stream> --encoder <kind> [--steps N] [--seed N] [--lr F]
 
-# Streams
-#   same-token-context   Same token appears with different latent roles
-#   role-sharing         Different tokens share the same latent role
-#   delayed-role         Role signal is temporally delayed
+# Streams: same-token-context | role-sharing | delayed-role
 
-# Encoders
-#   hash                 Raw token/hash control
-#   predictive           Sparse projection + context-key role prototypes (v2)
-#   e0                   Predictive + mean-pooled linear decoder
-#   e1a / e1-attn-linear Attention top-8 + linear readout
-#   e1b / e1-mean-mlp    Mean + one-hidden-layer MLP
-#   e1c / e1-attn-mlp    Attention top-8 + one-hidden-layer MLP
-
-# Encoders (archived)
-#   d / d-no-trace / d-no-role-proto
-
-# Example
-cargo run --release -- run e1a --stream role-sharing --encoder e1c --steps 10000 --lr 0.01
+# All encoder kinds are runnable but have all failed E-1A.
 ```
-
----
-
-## Key results (seed 1 / seed 2)
-
-### Dense_CPI — the binding constraint
-
-| Encoder | same-token-context | role-sharing | delayed-role |
-|---|---|---|---|
-| hash | 0.000 / 0.000 | 0.000 / 0.000 | 0.000 / 0.000 |
-| e0 (mean+linear) | -0.413 / -0.420 | -1.157 / -1.160 | -0.372 / -0.372 |
-| e1a (attn+linear) | -0.444 / -0.437 | -1.172 / -1.169 | -0.372 / -0.372 |
-| e1b (mean+MLP) | **-0.394 / -0.394** | **-1.116 / -1.116** | **-0.283 / -0.271** |
-| e1c (attn+MLP) | **-0.396 / -0.393** | **-1.117 / -1.116** | **-0.286 / -0.272** |
-
-### Attention diagnostics (E1c, seed 1)
-
-| Stream | mass_base | mass_proto | top_c1 | attn_corr | cpi_wo1 |
-|---|---|---|---|---|---|
-| same-token-context | 0.992 | 0.008 | 2.3e-05 | 0.003 | -0.307 |
-| role-sharing | 0.996 | 0.004 | -1.8e-06 | -0.005 | -1.012 |
-| delayed-role | 0.996 | 0.004 | 1.1e-05 | 0.040 | -0.240 |
-
-### Embedding role separation
-
-| Encoder | same-token-context | role-sharing | delayed-role |
-|---|---|---|---|
-| e0 | 1.375 / 1.393 | 1.143 / 1.100 | 1.047 / 0.725 |
-| e1c | 1.252 / 1.172 | 1.064 / 1.037 | 0.953 / 1.192 |
-
-See `docs/E1A_EXPERIMENT_REPORT.md` for the full 42-experiment matrix and analysis of all encoder series (v1, v2, D, E0, E1a, E1b, E1c).
 
 ---
 
@@ -128,32 +88,16 @@ See `docs/E1A_EXPERIMENT_REPORT.md` for the full 42-experiment matrix and analys
 - **CPU-first.** No GPU, no PyTorch/Candle/Burn.
 - **Safe Rust only** in core crates. No `unsafe`.
 - **Zero external dependencies** in `esm-core`.
-- **Integer IDs** instead of object graph pointers.
-- **No `Rc<RefCell<T>>`** in the core graph.
-- **No async runtime** in the core.
-- **Prequential protocol:** `encode` never sees `TargetEvent`; target is only used in `adapt`.
-- **No batch processing:** fully online, one step at a time.
-- **No MLP/attention/global hidden state** in the sparse encoder (decoder is diagnostic only and does not affect encoding).
-- **E-1A must pass** before ledger/claim/fork/router engineering begins.
+- **Prequential protocol:** `encode` never sees `TargetEvent`.
+- **No MLP/attention/global hidden state** in the sparse encoder.
+- **Decoder is diagnostic only** — does not affect encoding (except E2 variants).
 
 ---
 
-## Next step: Problem B — loss-based encoder shaping
+## Key scientific finding
 
-E1 closed the "fix the readout" hypothesis. The decoder is not the bottleneck.
-The next step is to shape the encoder's column selection using loss signal from the dense decoder:
-
-```
-Encoder v2 base (predictive projection + context prototypes)
-+ Dense decoder (MLP readout, already working at -0.27 nats)
-+ Loss-based feedback: dense decoder loss backpropagates into
-  the sparse encoder's column selection (utility shaping)
-
-via: credit-gated column utility. Features with positive
-leave-one-out credit get their column success_mass boosted;
-features with negative credit get it reduced.
-
-Key constraint: the encoder must remain sparse and online.
-The shaping signal must not create a second information channel
-that leaks TargetEvent into encode.
-```
+The Predictive v2 sparse encoder (projection + homeostasis + context prototypes)
+learns token-frequency features, not role features. The `embedding_role_separation`
+signal from E0 was a post-hoc artifact of supervised embedding training, not
+evidence of genuine role representation in the sparse code. No tested decoder
+or shaping mechanism could extract role information beyond the token baseline.

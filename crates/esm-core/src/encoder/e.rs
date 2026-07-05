@@ -1242,3 +1242,191 @@ impl_encoder_e1!(EncoderE1b, "e1-mean-mlp", PoolingMode::Mean, ReadoutMode::MLP 
 
 // E1c: attention + MLP
 impl_encoder_e1!(EncoderE1c, "e1-attn-mlp", PoolingMode::Attention { top_m: 8 }, ReadoutMode::MLP { hidden_dim: 32 });
+
+// =========================================================================
+// Encoder E2 — credit-gated sparse encoder shaping
+// =========================================================================
+
+/// E2 shaping mode.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum E2Mode {
+    /// Promote features with positive leave-one-out credit
+    CreditPromote,
+    /// Promote positive-credit, suppress negative-credit features
+    CreditPromoteSuppress,
+    /// Use global loss delta instead of per-feature credit (uniform boost/penalty)
+    NoLoo,
+}
+
+const SHAPE_BIAS: i32 = 100;
+
+macro_rules! impl_encoder_e2 {
+    ($name:ident, $encoder_kind:literal, $mode:expr) => {
+        pub struct $name {
+            pub base: PredictiveEncoder,
+            pub decoder: AttentionDecoder,
+        }
+
+        impl $name {
+            pub fn new(cfg: EncoderConfig) -> Self {
+                let proto_off = 3_000_000;
+                let proto_end = proto_off + cfg.max_roles as u32;
+                Self {
+                    base: PredictiveEncoder::new(cfg),
+                    decoder: AttentionDecoder::new(
+                        16,
+                        cfg.max_roles,
+                        cfg.lr,
+                        PoolingMode::Attention { top_m: 8 },
+                        ReadoutMode::MLP { hidden_dim: 32 },
+                        cfg.seed,
+                        proto_off,
+                        proto_end,
+                    ),
+                }
+            }
+        }
+
+        impl SparseEncoder for $name {
+            fn name(&self) -> &'static str {
+                $encoder_kind
+            }
+
+            fn encode(&self, input: &InputEvent) -> SparseCode {
+                self.base.encode(input)
+            }
+
+            fn adapt(&mut self, input: &InputEvent, target: &TargetEvent, code: &SparseCode) {
+                self.base.adapt(input, target, code);
+            }
+
+            fn dense_predict_prequential(&self, code: &SparseCode) -> Option<Vec<f32>> {
+                let (embed, _) = self.decoder.pool(code);
+                Some(self.decoder.forward(&embed))
+            }
+
+            fn dense_adapt(&mut self, code: &SparseCode, target: &TargetEvent) -> Option<DenseUpdateStats> {
+                for f in code.as_slice() {
+                    if !self.decoder.embeddings.contains_key(f) {
+                        let emb = self.decoder.init_embedding(*f);
+                        self.decoder.embeddings.insert(*f, emb);
+                    }
+                }
+
+                let (embed, attn_weights) = self.decoder.pool(code);
+                let active_features: Vec<FeatureId> = code.as_slice().to_vec();
+                let (loss, grad_norm) = self.decoder.backward_and_update(
+                    &embed,
+                    &active_features,
+                    &attn_weights,
+                    target.latent_role as usize,
+                );
+
+                self.decoder.accumulate_attention_diagnostics(&attn_weights);
+                self.decoder.store_attention_step(
+                    code.as_slice().to_vec(),
+                    attn_weights.iter().map(|(_, w)| *w).collect(),
+                    target.latent_role,
+                    embed,
+                    4096,
+                );
+
+                // Credit-gated encoder shaping
+                let base_off = self.base.base.feature_offset;
+                let n_cols = self.base.base.columns.len();
+
+                match $mode {
+                    E2Mode::CreditPromote => {
+                        let (_, credits) = self.decoder.compute_feature_credit(code, target);
+                        for (fid, credit) in credits {
+                            *self.decoder.credit_sums.entry(fid).or_insert(0.0) += credit;
+                            *self.decoder.credit_counts.entry(fid).or_insert(0) += 1;
+
+                            if fid.0 >= base_off && fid.0 < base_off + n_cols as u32 {
+                                let idx = (fid.0 - base_off) as usize;
+                                if let Some(col) = self.base.base.columns.get_mut(idx) {
+                                    if credit > 0.0 {
+                                        col.credit_bias = col.credit_bias.saturating_add(SHAPE_BIAS);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    E2Mode::CreditPromoteSuppress => {
+                        let (_, credits) = self.decoder.compute_feature_credit(code, target);
+                        for (fid, credit) in credits {
+                            *self.decoder.credit_sums.entry(fid).or_insert(0.0) += credit;
+                            *self.decoder.credit_counts.entry(fid).or_insert(0) += 1;
+
+                            if fid.0 >= base_off && fid.0 < base_off + n_cols as u32 {
+                                let idx = (fid.0 - base_off) as usize;
+                                if let Some(col) = self.base.base.columns.get_mut(idx) {
+                                    if credit > 0.0 {
+                                        col.credit_bias = col.credit_bias.saturating_add(SHAPE_BIAS);
+                                    } else if credit < 0.0 {
+                                        col.credit_bias = col.credit_bias.saturating_sub(SHAPE_BIAS);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    E2Mode::NoLoo => {
+                        let baseline = (self.base.max_roles as f32).ln();
+                        let improvement = baseline - loss;
+                        for fid in code.as_slice() {
+                            if fid.0 >= base_off && fid.0 < base_off + n_cols as u32 {
+                                let idx = (fid.0 - base_off) as usize;
+                                if let Some(col) = self.base.base.columns.get_mut(idx) {
+                                    if improvement > 0.0 {
+                                        col.credit_bias = col.credit_bias.saturating_add(SHAPE_BIAS);
+                                    } else {
+                                        col.credit_bias = col.credit_bias.saturating_sub(SHAPE_BIAS);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Some(DenseUpdateStats { loss, gradient_norm: grad_norm })
+            }
+
+            fn dense_report(&self) -> Option<DenseReport> {
+                let mut avg_credits = HashMap::new();
+                for (fid, sum) in &self.decoder.credit_sums {
+                    let count = self.decoder.credit_counts.get(fid).copied().unwrap_or(1).max(1);
+                    avg_credits.insert(*fid, sum / count as f32);
+                }
+
+                let attn_mass_count = self.decoder.attention_mass_count.max(1);
+                let attn_mass_base = self.decoder.attention_mass_base_sum / attn_mass_count as f64;
+                let attn_mass_proto = self.decoder.attention_mass_proto_sum / attn_mass_count as f64;
+
+                let top_credits = self.decoder.compute_top_attention_credits(&self.decoder.attention_samples);
+                let corr = self.decoder.compute_attention_credit_correlation();
+                let (nll_wo_1, nll_wo_3, nll_wo_5) = self.decoder.compute_nll_without_top(&self.decoder.attention_samples);
+
+                Some(DenseReport {
+                    feature_embeddings: self.decoder.embeddings.clone(),
+                    feature_credits: avg_credits,
+                    weight_norm: 0.0,
+                    bias_norm: 0.0,
+                    attention_mass_base: Some(attn_mass_base),
+                    attention_mass_proto: Some(attn_mass_proto),
+                    top_credit_1: Some(top_credits.0),
+                    top_credit_3: Some(top_credits.1),
+                    top_credit_5: Some(top_credits.2),
+                    attention_credit_corr: Some(corr),
+                    nll_without_top1: Some(nll_wo_1),
+                    nll_without_top3: Some(nll_wo_3),
+                    nll_without_top5: Some(nll_wo_5),
+                    attention_samples: Some(self.decoder.attention_samples.clone()),
+                })
+            }
+        }
+    };
+}
+
+impl_encoder_e2!(EncoderE2a, "e2-credit-promote", E2Mode::CreditPromote);
+impl_encoder_e2!(EncoderE2b, "e2-credit-promote-suppress", E2Mode::CreditPromoteSuppress);
+impl_encoder_e2!(EncoderE2c, "e2-no-loo", E2Mode::NoLoo);

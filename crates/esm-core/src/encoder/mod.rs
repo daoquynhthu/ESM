@@ -17,7 +17,7 @@ use crate::feature::{FeatureId, SparseCode};
 use crate::rng::mix64;
 
 use self::d::EncoderD;
-use self::e::{AttentionStep, EncoderE0, EncoderE1a, EncoderE1b, EncoderE1c};
+use self::e::{AttentionStep, EncoderE0, EncoderE1a, EncoderE1b, EncoderE1c, EncoderE2a, EncoderE2b, EncoderE2c};
 
 #[derive(Clone, Debug)]
 pub struct DenseUpdateStats {
@@ -89,6 +89,10 @@ pub enum EncoderKind {
     E1AttnLinear,
     E1MeanMLP,
     E1AttnMLP,
+    /// E2 series: credit-gated sparse encoder shaping
+    E2CreditPromote,
+    E2CreditPromoteSuppress,
+    E2NoLoo,
 }
 
 impl EncoderKind {
@@ -104,6 +108,9 @@ impl EncoderKind {
             "e1-attn-linear" | "e1a" => Some(Self::E1AttnLinear),
             "e1-mean-mlp" | "e1b" => Some(Self::E1MeanMLP),
             "e1-attn-mlp" | "e1c" => Some(Self::E1AttnMLP),
+            "e2-credit-promote" | "e2a" => Some(Self::E2CreditPromote),
+            "e2-credit-promote-suppress" | "e2b" => Some(Self::E2CreditPromoteSuppress),
+            "e2-no-loo" | "e2c" => Some(Self::E2NoLoo),
             _ => None,
         }
     }
@@ -152,6 +159,9 @@ pub fn build_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Box<dyn SparseEnc
         EncoderKind::E1AttnLinear => Box::new(EncoderE1a::new(cfg)),
         EncoderKind::E1MeanMLP => Box::new(EncoderE1b::new(cfg)),
         EncoderKind::E1AttnMLP => Box::new(EncoderE1c::new(cfg)),
+        EncoderKind::E2CreditPromote => Box::new(EncoderE2a::new(cfg)),
+        EncoderKind::E2CreditPromoteSuppress => Box::new(EncoderE2b::new(cfg)),
+        EncoderKind::E2NoLoo => Box::new(EncoderE2c::new(cfg)),
     }
 }
 
@@ -197,11 +207,12 @@ impl SparseEncoder for HashEncoder {
 pub struct Column {
     pub usage: u64,
     pub success_mass: f32,
+    pub credit_bias: i32,
 }
 
 impl Column {
     pub fn new() -> Self {
-        Self { usage: 0, success_mass: 0.0 }
+        Self { usage: 0, success_mass: 0.0, credit_bias: 0 }
     }
 }
 
@@ -301,6 +312,7 @@ impl CompetitiveEncoder {
                 scores[idx] = scores[idx].saturating_sub(excess * 20);
             }
             scores[idx] = scores[idx].saturating_add(col.success_mass.round() as i32);
+            scores[idx] = scores[idx].saturating_add(col.credit_bias);
         }
         scores
     }

@@ -644,110 +644,226 @@ does not carry enough role information for any readout tested.
 
 ---
 
-## 11. Next steps
+## 10. Encoder E2: credit-gated sparse encoder shaping
+
+### 10.1 Design
+
+E2 tested whether the dense decoder's loss signal could be used to shape the
+sparse encoder's column selection, driving the encoder toward more role-discriminative
+features. The architecture:
 
 ```
-Current status:
-  v1:              FAIL (implementation collapse)
-  v2:              FAIL (representation gate)
-  D:               FAIL (dual-channel regresses)
-  E0:              PARTIAL PASS (representation exists, readout fails)
-  E1a:             FAIL (attention+linear — attention inert)
-  E1b:             FAIL (mean+MLP — improves but cannot cross zero)
-  E1c:             FAIL (attention+MLP — same as E1b, attention inert)
-  E-1A gate:       FAIL — do not implement E-1B
-  Scientific dir:  NEEDS REDIRECTION
+E2 = Predictive v2 (unchanged sparse base)
+   + AttentionDecoder (same as E1c: attn+MLP, diagnostic head only)
+   + credit_bias on each Column (new i32 field)
+   + shaping logic in dense_adapt()
 ```
 
-### E1 closed the "fix the readout" hypothesis
+Three ablation variants:
 
-Encoder E1 systematically tested three decoder architectures against E0:
-
-| Hypothesis | Test | Result |
+| Variant | Shaping rule | Expected effect |
 |---|---|---|
-| Mean pooling is the bottleneck | E1a (attn+linear) vs E0 (mean+linear) | **REJECTED** — attn+linear ≈ mean+linear |
-| Linear readout is the bottleneck | E1b (mean+MLP) vs E0 (mean+linear) | **PARTIALLY SUPPORTED** — MLP helps, but not enough |
-| Both are bottlenecks | E1c (attn+MLP) vs E0 (mean+linear) | **MLP helps, attention adds nothing** |
+| e2a (CreditPromote) | `credit > 0` → `credit_bias += 100` | Promote helpful features |
+| e2b (CreditPromoteSuppress) | `credit > 0` → `+100`, `credit < 0` → `-100` | Promote + suppress |
+| e2c (NoLoo) | decoder beats random → `+100` uniformly | Global loss → uniform boost |
 
-The decoder is not the binding constraint. The encoder's sparse representation
-does not carry enough linearly-decodable role information to pass E-1A, regardless
-of decoder architecture.
+The `credit_bias` feeds into `projected_scores()` as an additive term alongside
+the base projection score and `success_mass`:
 
-### The corrected problem statement
+```rust
+scores[idx] = base_score + success_mass + credit_bias
+```
 
-The E0 post-mortem stated: "Sparse code DOES contain role information, but the
-readout cannot extract it." E1 has now shown that even a nonlinear readout cannot
-extract it. The remaining possibilities are:
+### 10.2 Results
 
-| Possibility | Evidence | Action |
+```
+Dense_CPI (role-sharing, seed 1):
+
+Encoder      dense_CPI    feat_CPI     unique_features  role_sharing
+e1c (base)   -1.117       -0.023       4099             0.027
+e2a          -1.118       -0.313       4099             0.051
+e2b          -1.118       -0.313       4099             0.133
+e2c          -1.117       -0.974       159              0.931
+```
+
+```
+Sparse code quality (role-sharing, seed 1):
+
+Encoder      code_entropy  same_token_ctx_split  attention_mass_base
+e1c          7.97          0.000                 0.996
+e2a          7.37          0.000                 0.986
+e2b          7.34          0.000                 0.979
+e2c          2.97          0.000                 0.999
+```
+
+### 10.3 Analysis
+
+**e2c (NoLoo) caused catastrophic collapse:** 159 unique features (vs 4099 at
+baseline). The +100 uniform bias to ALL active features creates a Matthew effect:
+columns that win more often accumulate more bias, win even more, and starve the
+remaining 3937 columns. This is the same failure mode as the original v1 WTA
+collapse, now driven by credit bias instead of random tie-breaking.
+
+**e2a/e2b (LOO credit) caused moderate degradation:** feat_CPI drops from -0.023
+to -0.312, indicating the sparse code now carries LESS role information than the
+unsupervised baseline. The credit signal from leave-one-out is noisy and creates
+a weak positive feedback loop that concentrates selection on a few features
+without improving their role-discriminative quality.
+
+**dense_CPI is unchanged across all E2 variants:** -1.117 to -1.118. The shaping
+cannot overcome the fundamental limitation of the encoder representation.
+
+### 10.4 Root cause: the Matthew effect
+
+The credit-gated shaping creates a positive feedback loop:
+
+```
+feature gets selected
+  → decoder sees it, computes credit
+  → credit > 0 (noisy) → credit_bias += 100
+  → feature wins more often in future
+  → repeat
+```
+
+This feedback loop is NOT role-discriminative. The credit signal from the dense
+decoder is noisy and distributed across features. Any feature that happens to
+be active on an early step where the decoder is slightly correct gets promoted,
+regardless of whether it genuinely carries role information. Once promoted,
+it wins more, gets more credit, and entrenches its advantage.
+
+The net result is concentration without discrimination — feature diversity
+collapses without improving role prediction.
+
+### 10.5 E2 verdict
+
+```
+E2:
+  Hypothesis (credit → utility → better representation):  REJECTED
+  e2a (credit-promote):                                   FAIL (degrades feat_CPI)
+  e2b (credit-promote-suppress):                          FAIL (same)
+  e2c (no-loo uniform):                                   FAIL (catastrophic collapse)
+  dense_CPI improved by any variant:                      NO (all -1.117)
+  Cause:                                                  Matthew effect from bias feedback
+```
+
+### 10.6 Theoretical explanation
+
+The failure of both E1 (decoder readout) and E2 (encoder shaping) reveals a
+fundamental property of the Predictive v2 sparse representation:
+
+> **The sparse features learned by projection + homeostasis are token-frequency
+> features, not role features. No amount of decoder architecture or credit shaping
+> can extract role information that was never encoded.**
+
+The `embedding_role_separation > 0` signal from E0 is now explained as a
+post-hoc artifact: given ANY set of features partitioned by empirical role
+frequency, the 16-dim learned embeddings will trivially separate by majority
+role. This is a property of the supervised embedding training, not evidence that
+the sparse code carries usable role information.
+
+The corrected chain of reasoning:
+
+1. Predictive v2's features are selected by projection + homeostasis +
+   context-prototype voting. The selection is driven by token frequency,
+   not role informativeness.
+2. Learned embeddings separate by role because they are trained to predict the
+   role from the pooled embedding. This is a supervised label — not evidence of
+   genuine representation quality.
+3. When role prediction is attempted from the pooled embedding (E0/E1), it fails
+   because the pooled signal is dominated by token identity, not role.
+4. When the encoder's selection is biased by credit from the decoder (E2), it
+   concentrates on features that happen to correlate with the decoder's bias,
+   destroying diversity without improving role prediction.
+
+---
+
+## 11. Final status and next steps
+
+### 11.1 Complete experimental record
+
+```
+Encoder family     dense_CPI range     feat_CPI range     Unique feat.
+v1 (competitive)   —                   -0.74 to -0.26    32
+v2 (predictive)    —                   -0.13 to +0.33    3800-4100
+D (dual-channel)   —                   -0.89 to -0.10    5400-5700
+E0 (mean+linear)   -1.16 to -0.37      -0.13 to +0.33    3800-4100
+E1a (attn+linear)  -1.17 to -0.37      -0.13 to +0.33    3800-4100
+E1b (mean+MLP)     -1.12 to -0.27      -0.13 to +0.33    3800-4100
+E1c (attn+MLP)     -1.12 to -0.27      -0.13 to +0.33    3800-4100
+E2a (credit-prom)  -1.12 to -0.27      -0.31 to +0.33    3800-4100
+E2b (prom+suppr)   -1.12 to -0.27      -0.31 to +0.33    3800-4100
+E2c (uniform)      -1.12 to -0.27      -0.97 to +0.33    159
+```
+
+### 11.2 What was tested and why each failed
+
+| Approach | Tested in | Failure mode |
 |---|---|---|
-| Role info exists but is destroyed by pooling | embedding_role_separation > 0 | Still possible |
-| Role info exists but requires per-feature (not pooled) readout | — | Test with feature-wise classifier |
-| Role info does NOT exist in a usable form | dense_CPI < 0 on all 4 decoders | **Currently most consistent** |
-| Role info exists but requires loss-based encoder shaping | — | Problem B (untested) |
+| Sparse projection (WTA) | v1 | Implementation collapse (32 of 4096) |
+| Homeostatic anti-collapse | v2 | Fixes collapse but features encode token freq, not roles |
+| Context-key role prototypes | v2/D | Add weak role bias but cross-token abstraction fails |
+| Dual-channel surface + role | D | Regresses vs v2 (channels compete, not complement) |
+| Context traces | D | Zero measurable effect (rent-based lifecycle too short) |
+| Mean-pooled linear decoder | E0 | Cannot extract role from pooled token-dominant embedding |
+| Attention-pooled linear | E1a | Attention mechanism is inert (gradient too weak) |
+| Mean-pooled MLP decoder | E1b | Improves (+0.09 nats) but cannot cross zero |
+| Attention-pooled MLP | E1c | Attention inert, MLP helps but not enough |
+| LOO credit → column bias | E2a/E2b | Matthew effect concentrates selection, hurts feat_CPI |
+| Uniform loss → column bias | E2c | Catastrophic collapse (159 unique features) |
 
-### Primary recommendation: Problem B — loss-based encoder shaping
+### 11.3 Scientific conclusion
 
-Stop iterating on decoder architectures. The encoder representation itself needs
-to be shaped by the role-prediction loss, not just by the unsupervised projection
-+ homeostasis + context-key prototype mechanism.
+The original hypothesis — "a CPU-first, online, sparse competitive encoder can form
+latent-role representations beyond token identity" — is **NOT SUPPORTED** across
+10 independently tested configurations spanning 3 encoder series, 4 decoder
+architectures, and 2 shaping mechanisms.
 
-The core idea of Problem B:
+The final correct explanation:
 
-```
-Encoder v2 base (predictive projection + context prototypes)
-+ Dense decoder (MLP readout, already working at -0.27 nats)
-+ Loss-based feedback: dense decoder loss backpropagates into
-  the sparse encoder's column selection (utility shaping)
+> The Predictive v2 sparse encoder learns a distributed representation of
+> token-context co-occurrence patterns. Its features are selected by projection
+> similarity scores biased by role-usage statistics. This produces features that
+> separate by role in learned embedding space after supervised training, but the
+> separation is a post-hoc artifact of the embedding training, not a property of
+> the sparse code itself. The pooled sparse representation is dominated by token
+> identity, and neither advanced readout architectures nor loss-based encoder
+> shaping can extract role information that was never encoded at the sparse
+> code level.
 
-Key constraint: the encoder must remain sparse and online.
-The shaping signal must not create a second information channel
-that leaks TargetEvent into encode.
+### 11.4 Do not continue
 
-Approach: credit-gated column utility. Features with positive
-leave-one-out credit get their column success_mass boosted;
-features with negative credit get it reduced. This is the same
-mechanism as PredictiveEncoder's success_mass but driven by
-dense decoder loss instead of local role statistics.
-```
+Do not implement:
+- E-1B (sequence segmentation) — requires working role likelihoods
+- E3, E4 (higher gates) — blocked by E-1A failure
+- Any further E-series variants (attention, MLP, shaping) — all failed
+- D-series revival — already archived
 
-### Do not enter E-1B
+If future work revisits this problem, it should start from a fundamentally
+different representation learning approach:
 
-E-1B (sequence segmentation with dense traces) depends on reliable per-step
-role likelihoods. Dense_CPI remains negative under all tested decoders. The
-segmenter would be built on a noisy signal that does not generalize across roles.
-
-### Secondary options
-
-1. **Per-feature (non-pooled) classifier.** Instead of pooling embeddings, train
-   a classifier on individual feature embeddings. This tests whether role info
-   is destroyed by pooling vs. genuinely absent.
-
-2. **Higher-dim embeddings.** 16-dim may be too narrow. Test with 32 or 64 dims.
-
-3. **Stop and document.** The project has shown that Predictive v2 + any tested
-   decoder cannot pass E-1A. The sparse projection + homeostasis encoder may be
-   fundamentally bounded. Future work outside ESM's architecture could revisit
-   the problem with a different representation learning approach.
+- Online sparse dictionary learning with role reconstruction loss
+- Contrastive predictive coding over latent role sequences
+- External dense teacher → sparse student distillation
+- Differentiable sparse selection (Gumbel-Softmax over columns)
 
 ---
 
 ## 12. Files changed (all commits)
 
 - `crates/esm-core/src/encoder/mod.rs` — SparseEncoder trait, EncoderKind (Hash,
-  Competitive, Predictive, D-series archived, E0, E1AttnLinear, E1MeanMLP, E1AttnMLP),
-  DenseReport with attention diagnostic fields, build_encoder mapping.
-- `crates/esm-core/src/encoder/d.rs` — Encoder D series (archived; dual-channel,
-  anti-Hebbian, context traces, ablation variants).
-- `crates/esm-core/src/encoder/e.rs` — E0, E1a, E1b, E1c encoders: DenseDecoder
-  (mean+linear), AttentionDecoder (mean/attention pooling + linear/MLP readout),
-  attention backprop, leave-one-out credit, attention diagnostics
-  (attention_mass_by_feature_type, top_attention_feature_credit,
-  dense_CPI_without_top_features, attention_credit_correlation).
-- `crates/esm-core/src/metrics.rs` — E1aReport with attention diagnostic fields
-  (attention_mass_base, attention_mass_proto, top_credit_1/3/5,
-  dense_cpi_without_top1/3/5, attention_credit_corr), set_e1_diagnostics().
-- `crates/esm-runner/src/e1a.rs` — Post-hoc attention diagnostics from DenseReport.
-- `crates/esm-cli/src/main.rs` — Usage with all E1 encoder aliases.
-- `docs/E1A_EXPERIMENT_REPORT.md` — This report (E1 results and revised conclusions).
+  Competitive, Predictive, D-series archived, E0, E1AttnLinear, E1MeanMLP,
+  E1AttnMLP, E2CreditPromote, E2CreditPromoteSuppress, E2NoLoo),
+  DenseReport with attention diagnostic fields, Column.credit_bias,
+  credit_bias in projected_scores, build_encoder mapping.
+- `crates/esm-core/src/encoder/d.rs` — Encoder D series (archived).
+- `crates/esm-core/src/encoder/e.rs` — E0, E1a, E1b, E1c, E2a, E2b, E2c:
+  DenseDecoder, AttentionDecoder (attention/mean pooling + linear/MLP readout),
+  attention backprop, leave-one-out credit, attention diagnostics,
+  credit-gated encoder shaping with credit_bias, E2Mode enum.
+- `crates/esm-core/src/metrics.rs` — E1aReport with all diagnostic fields,
+  set_e1_diagnostics().
+- `crates/esm-runner/src/e1a.rs` — Post-hoc diagnostics.
+- `crates/esm-cli/src/main.rs` — Usage with E1 + E2 encoder aliases.
+- `docs/E1A_EXPERIMENT_REPORT.md` — This report (complete record: v1/v2/D/E0/E1/E2).
+- `README.md` — Updated project status and final conclusions.
 - `run_e1.ps1` — Batch experiment runner script.
