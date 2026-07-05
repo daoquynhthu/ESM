@@ -48,8 +48,10 @@ pub struct E1aMetrics {
     n: u64,
     token_nll_sum: f64,
     code_nll_sum: f64,
+    feature_vote_nll_sum: f64,
     token_role: HashMap<u32, RoleCounts>,
     code_role: HashMap<u64, RoleCounts>,
+    feature_role: HashMap<FeatureId, RoleCounts>,
     feature_usage: HashMap<FeatureId, u64>,
     active_bits_sum: u64,
     samples: Vec<CodeSample>,
@@ -62,7 +64,9 @@ pub struct E1aReport {
     pub steps: u64,
     pub token_nll: f64,
     pub code_nll: f64,
+    pub feature_vote_nll: f64,
     pub controlled_predictive_info: f64,
+    pub controlled_feature_predictive_info: f64,
     pub same_token_context_split: f64,
     pub role_sharing: f64,
     pub code_entropy: f64,
@@ -78,8 +82,10 @@ impl E1aMetrics {
             n: 0,
             token_nll_sum: 0.0,
             code_nll_sum: 0.0,
+            feature_vote_nll_sum: 0.0,
             token_role: HashMap::new(),
             code_role: HashMap::new(),
+            feature_role: HashMap::new(),
             feature_usage: HashMap::new(),
             active_bits_sum: 0,
             samples: Vec::with_capacity(sample_limit.min(1024)),
@@ -100,9 +106,11 @@ impl E1aMetrics {
             .get(&code_sig)
             .map(|c| c.nll(role))
             .unwrap_or_else(|| RoleCounts::new(self.max_roles).nll(role));
+        let feature_vote_nll = self.feature_vote_nll(code, role);
 
         self.token_nll_sum += token_nll;
         self.code_nll_sum += code_nll;
+        self.feature_vote_nll_sum += feature_vote_nll;
         self.n = self.n.saturating_add(1);
         self.active_bits_sum = self.active_bits_sum.saturating_add(code.len() as u64);
 
@@ -117,6 +125,10 @@ impl E1aMetrics {
 
         for f in code.as_slice() {
             *self.feature_usage.entry(*f).or_insert(0) += 1;
+            self.feature_role
+                .entry(*f)
+                .or_insert_with(|| RoleCounts::new(self.max_roles))
+                .update(role);
         }
 
         if self.samples.len() < self.sample_limit {
@@ -128,19 +140,40 @@ impl E1aMetrics {
         let n = self.n.max(1) as f64;
         let token_nll = self.token_nll_sum / n;
         let code_nll = self.code_nll_sum / n;
+        let feature_vote_nll = self.feature_vote_nll_sum / n;
         E1aReport {
             encoder: encoder.to_string(),
             stream: stream.to_string(),
             steps: self.n,
             token_nll,
             code_nll,
+            feature_vote_nll,
             controlled_predictive_info: token_nll - code_nll,
+            controlled_feature_predictive_info: token_nll - feature_vote_nll,
             same_token_context_split: self.same_token_context_split(),
             role_sharing: self.role_sharing(),
             code_entropy: self.code_entropy(),
             active_bits_avg: self.active_bits_sum as f64 / n,
             unique_features: self.feature_usage.len(),
         }
+    }
+
+
+    fn feature_vote_nll(&self, code: &SparseCode, role: usize) -> f64 {
+        let mut role_mass = vec![1.0f64; self.max_roles];
+        let mut total_mass = self.max_roles as f64;
+        for f in code.as_slice() {
+            if let Some(counts) = self.feature_role.get(f) {
+                for (r, count) in counts.counts.iter().copied().enumerate() {
+                    if let Some(mass) = role_mass.get_mut(r) {
+                        *mass += count as f64;
+                    }
+                }
+                total_mass += counts.total as f64;
+            }
+        }
+        let p = role_mass.get(role).copied().unwrap_or(1.0) / total_mass.max(1.0);
+        -p.ln()
     }
 
     fn same_token_context_split(&self) -> f64 {
@@ -199,7 +232,9 @@ impl E1aReport {
                 "  \"steps\": {},\n",
                 "  \"token_nll\": {:.8},\n",
                 "  \"code_nll\": {:.8},\n",
+                "  \"feature_vote_nll\": {:.8},\n",
                 "  \"controlled_predictive_info\": {:.8},\n",
+                "  \"controlled_feature_predictive_info\": {:.8},\n",
                 "  \"same_token_context_split\": {:.8},\n",
                 "  \"role_sharing\": {:.8},\n",
                 "  \"code_entropy\": {:.8},\n",
@@ -212,7 +247,9 @@ impl E1aReport {
             self.steps,
             self.token_nll,
             self.code_nll,
+            self.feature_vote_nll,
             self.controlled_predictive_info,
+            self.controlled_feature_predictive_info,
             self.same_token_context_split,
             self.role_sharing,
             self.code_entropy,
