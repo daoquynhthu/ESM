@@ -350,16 +350,19 @@ impl AttentionDecoder {
                     hidden[h] = relu(val);
                 }
 
-                // d_w2[h][r] = d_logits[r] * hidden[h]
-                // d_b2[r] = d_logits[r]
-                // d_hidden[h] = sum_r d_logits[r] * w2[h][r]
+                // d_hidden[h] = sum_r d_logits[r] * w2[h][r] (from OLD w2)
                 let mut d_hidden = vec![0.0f32; hidden_dim];
+                for h in 0..hidden_dim {
+                    for r in 0..self.max_roles {
+                        d_hidden[h] += d_logits[r] * self.w2[h][r];
+                    }
+                }
+                // d_w2[h][r] = d_logits[r] * hidden[h], then update w2
                 for h in 0..hidden_dim {
                     for r in 0..self.max_roles {
                         let dw = d_logits[r] * hidden[h];
                         grad_norm += dw * dw;
                         self.w2[h][r] -= self.learning_rate * dw;
-                        d_hidden[h] += d_logits[r] * self.w2[h][r];
                     }
                 }
                 for r in 0..self.max_roles {
@@ -374,16 +377,19 @@ impl AttentionDecoder {
                     }
                 }
 
-                // d_w1[i][h] = d_hidden[h] * embed[i]
-                // d_b1[h] = d_hidden[h]
-                // d_embed[i] += sum_h d_hidden[h] * w1[i][h]
+                // d_embed_from_readout[i] = sum_h d_hidden[h] * w1[i][h] (from OLD w1)
                 let mut d_embed_readout = vec![0.0f32; self.embed_dim];
+                for i in 0..self.embed_dim {
+                    for h in 0..hidden_dim {
+                        d_embed_readout[i] += d_hidden[h] * self.w1[i][h];
+                    }
+                }
+                // d_w1[i][h] = d_hidden[h] * embed[i], then update w1
                 for i in 0..self.embed_dim {
                     for h in 0..hidden_dim {
                         let dw = d_hidden[h] * embed[i];
                         grad_norm += dw * dw;
                         self.w1[i][h] -= self.learning_rate * dw;
-                        d_embed_readout[i] += d_hidden[h] * self.w1[i][h];
                     }
                 }
                 for h in 0..hidden_dim {
@@ -391,42 +397,6 @@ impl AttentionDecoder {
                     self.b1[h] -= self.learning_rate * d_hidden[h];
                 }
 
-                // Accumulate d_embed from readout (will be used below for embedding update)
-                // We store it back into embed gradient
-                // Actually, let me use a different approach: compute d_embed here and combine with attention gradient
-                // For now, we'll update embeddings later based on d_embed that we compute below
-                // Actually for MLP, the embedding gradient is d_embed_readout from the readout path
-                // combined with the attention gradient. Let me use the same approach as linear case.
-                // For simplicity, I'll modify the approach: compute d_embed after attention backprop.
-                // For now, let me just save d_embed_readout.
-                // But wait, for linear case I compute d_embed inline. Let me restructure.
-                // Actually, the simplest approach: compute d_embed_for_update after attention backprop.
-                // Let me handle this the same way as linear but with the correct d_embed.
-                // I'll restructure this to use d_embed throughout.
-
-                // Actually, I realize this is getting complex. Let me just compute d_embed after
-                // the attention backprop, and use the correct computation per readout mode.
-                // I'll store the d_embed from readout here and combine it with attention gradient
-                // after computing the attention Jacobian.
-
-                // d_embed for embedding update = d_embed_readout + d_embed_attention
-                // where d_embed_readout is computed here and d_embed_attention from the attention Jacobian.
-                // For MLP, d_embed_readout[i] = sum_h d_hidden[h] * w1[i][h]
-                // For linear, d_embed_readout[i] = sum_r d_logits[r] * w2[i][r]
-
-                // Combine into d_embed (we'll use it below)
-                // Actually, for the attention backprop we need the full pooled gradient,
-                // which is the combined d_embed. But the readout gives us d_embed directly
-                // (the gradient w.r.t. the pooled embedding), which is what we need.
-                // Let me just set d_embed = d_embed_readout and proceed.
-
-                // But wait, I already computed d_embed in the linear case inline. Let me refactor.
-                // I'll compute d_pooled here (gradient w.r.t. pooled embedding) and use it
-                // for both the attention backprop and the embedding update.
-
-                // Actually, let me just compute d_pooled for each readout mode and use it below.
-                // For now, let me just move on and handle this uniformly after the match.
-                // The d_embed_from_readout will be used for both embedding update and attention backprop.
             }
         }
 
@@ -582,7 +552,7 @@ impl AttentionDecoder {
             if let Some(de) = d_embed_for_update.get(f) {
                 if let Some(emb) = self.embeddings.get_mut(f) {
                     for i in 0..self.embed_dim {
-                        emb[i] -= self.learning_rate * de[i] / n_active as f32;
+                        emb[i] -= self.learning_rate * de[i];
                     }
                 }
             }
