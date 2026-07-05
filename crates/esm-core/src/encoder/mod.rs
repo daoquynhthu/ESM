@@ -61,6 +61,24 @@ pub trait SparseEncoder {
     fn dense_report(&self) -> Option<DenseReport> {
         None
     }
+
+    /// Apply retrospective credit to features that were active at a past step.
+    /// Used by the causal ledger to assign delayed credit.
+    /// `cue_features` are features that were active at the cue step.
+    /// `verified_role` is the role confirmed at verify step.
+    fn retrospective_credit(
+        &mut self,
+        _cue_features: &[FeatureId],
+        _cue_step: u64,
+        _verified_role: usize,
+    ) {
+    }
+
+    /// Return the predicted role by majority vote of columns active in the code.
+    /// Returns `None` if no columns have any role data yet.
+    fn sparse_role_vote(&self, _code: &SparseCode) -> Option<(usize, f32)> {
+        None
+    }
 }
 
 /// Encoder kinds currently in service:
@@ -401,6 +419,36 @@ impl SparseEncoder for PredictiveEncoder {
         "predictive"
     }
 
+    fn sparse_role_vote(&self, code: &SparseCode) -> Option<(usize, f32)> {
+        let mut votes = vec![0u32; self.max_roles];
+        let mut total = 0u32;
+        for fid in code.as_slice() {
+            if fid.0 < self.base.feature_offset {
+                continue;
+            }
+            let idx = (fid.0 - self.base.feature_offset) as usize;
+            if idx >= self.role_counts_by_column.len() {
+                continue;
+            }
+            let counts = &self.role_counts_by_column[idx];
+            let total_for_col: u32 = counts.iter().sum();
+            if total_for_col > 0 {
+                if let Some((role, _, _)) = Self::dominant_role(counts) {
+                    votes[role] = votes[role].saturating_add(1);
+                    total += 1;
+                }
+            }
+        }
+        if total == 0 {
+            return None;
+        }
+        let predicted = votes.iter().enumerate()
+            .max_by_key(|(_, c)| **c)
+            .map(|(r, _)| r)?;
+        let confidence = votes[predicted] as f32 / total as f32;
+        Some((predicted, confidence))
+    }
+
     fn encode(&self, input: &InputEvent) -> SparseCode {
         let mut features = self.base.encode(input).as_slice().to_vec();
 
@@ -414,6 +462,37 @@ impl SparseEncoder for PredictiveEncoder {
         }
 
         SparseCode::new(features)
+    }
+
+    fn retrospective_credit(
+        &mut self,
+        cue_features: &[FeatureId],
+        _cue_step: u64,
+        verified_role: usize,
+    ) {
+        for fid in cue_features {
+            if fid.0 < self.base.feature_offset {
+                continue;
+            }
+            let idx = (fid.0 - self.base.feature_offset) as usize;
+            if idx >= self.role_counts_by_column.len() {
+                continue;
+            }
+            // Assign role counts retroactively (like adapt() at the past step)
+            if let Some(counts) = self.role_counts_by_column.get_mut(idx) {
+                counts[verified_role] = counts[verified_role].saturating_add(1);
+
+                // Update success_mass based on whether this column's
+                // majority role now matches the verified role
+                if let Some((dominant, best, second)) = Self::dominant_role(counts) {
+                    if dominant == verified_role && best >= second.saturating_add(2) {
+                        if let Some(col) = self.base.columns.get_mut(idx) {
+                            col.success_mass = (col.success_mass + 0.25).min(50.0);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn adapt(&mut self, input: &InputEvent, target: &TargetEvent, code: &SparseCode) {

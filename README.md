@@ -1,21 +1,30 @@
-# Elastic Sparse Machine (ESM) — Gate E-1A Lab
+# Elastic Sparse Machine (ESM) — Gate E-1 Lab
 
 CPU-first, zero-dependency Rust workspace for engineering online sparse encoders that learn latent-role representations beyond token identity.
 
-**Project status: E-1A PARTIAL PASS (corrected after bug fixes).**
+**Project status: E-1A PARTIAL PASS. E-1B bridge: LEDGER ALONE INSUFFICIENT.**
 
 The hypothesis — "a CPU-first, online, sparse competitive encoder can form latent-role
-representations beyond token identity" — is **PARTIALLY SUPPORTED**. The Predictive v2
+representations beyond token identity" — is **PARTIALLY SUPPORTED** (E-1A). The Predictive v2
 sparse encoder DOES carry readable role information. Previous "FAIL" verdict was caused
 by two implementation bugs in the AttentionDecoder (MLP backprop order, extra `/n_active`
 on embedding updates) and insufficient training steps (10K), not by a fundamental
 representation failure.
 
-**Verdict boundaries (final audit):**
+E-1B bridge validation tested whether a **minimal causal ledger** (FIFO ring buffer of
+encoder states, retrospective credit to cue-step features at verify time) can bridge a
+6-step delay between cue and verification. **Result: ledger reinforces cue-step columns
+but hurts verify-step generalization** — cue-step accuracy improved +4.5% (76% → 81%)
+but verify-step accuracy dropped -0.8% (51.9% → 51.1%). Naive retrospective credit
+causes overfitting to cue-specific (token/position) columns, diluting the competitive
+advantage of context-generalizing columns. A smarter ledger is needed — one that credits
+only columns whose inputs generalize across the delay gap.
+
+**Verdict boundaries (final):**
 - ✅ E-1A: **PARTIAL PASS** (~FAIL / NOT SUPPORTED no longer valid)
 - ✅ E0 embedding_role_separation > 0: **genuine signal** (~artifact designation overturned; 50K/100K dense_CPI confirms role-readable signal)
 - ❌ role-sharing stream: **retired as primary metric** (token baseline saturated; use same-token-context or delayed-role instead)
-- ⏸️ E-1B bridge validation: **may start** (role likelihoods exist)
+- ⏸️ E-1B bridge: **LEDGER ALONE INSUFFICIENT** (needs context-generalizing credit mechanism to pass)
 - ⏸️ E3/E4: **not yet released** (wait for E-1B passage)
 
 **Frozen: attention-weighted pooling.** Current softmax top-m attention with learned key
@@ -45,8 +54,9 @@ mean pooling for all future readouts.
 | **E1c** `attn+MLP` 10K | -0.39 | FAIL | Both bugs |
 | **E1c** `attn+MLP` 50K (fixed) | -0.145 | FAIL | Attn mechanism inert even with fixes |
 | **E2** all variants | — | FAIL | Credit shaping creates Matthew effect |
+| **E-1B** bridge (predictive, 100K, shared context) | — | ⏸️ **LEDGER ALONE INSUFFICIENT** | Ledger helps cue (+4.5%) but hurts verify (-0.8%). Naive retrospective credit overfits to cue-specific columns |
 
-**Gate E-1A: PARTIAL PASS (corrected). E-1B bridge validation may proceed; E3/E4 wait.**
+**Gate E-1A: PARTIAL PASS (corrected). E-1B bridge: LEDGER ALONE INSUFFICIENT (needs context-generalizing credit mechanism). E3/E4 wait.**
 
 ---
 
@@ -60,11 +70,12 @@ crates/
         mod.rs       SparseEncoder trait, EncoderKind, hash/competitive/predictive
         d.rs         D series — archived (dual-channel, anti-Hebbian, traces)
         e.rs         E series — E0/E1a/E1b/E1c/E2a/E2b/E2c (archived experiments)
+      ledger.rs      CausalLedger — FIFO ring buffer for E-1B bridge validation
       metrics.rs     E1aMetrics, E1aReport, dense_CPI, embedding_role_separation
       event.rs       InputEvent, TargetEvent (prequential protocol)
       feature.rs     FeatureId, SparseCode (sparse binary codes)
       rng.rs         Deterministic hash-based RNG
-  esm-runner/        Experiment harness (e1a.rs) and synthetic streams
+  esm-runner/        Experiment harness (e1a.rs, e1b.rs) and synthetic streams
   esm-cli/           CLI entry point
   esm-tools/         Development utilities
 
@@ -96,8 +107,11 @@ docs/
 ## CLI usage
 
 ```bash
-# Run any experiment (archived encoders still runnable for reproducibility)
+# Run E-1A experiment (archived encoders still runnable for reproducibility)
 cargo run --release -- run e1a --stream <stream> --encoder <kind> [--steps N] [--seed N] [--lr F]
+
+# Run E-1B bridge validation
+cargo run --release -- run e1b --encoder predictive [--steps N] [--seed N] [--ledger-gap N]
 
 # Streams: same-token-context | role-sharing | delayed-role
 
@@ -144,3 +158,42 @@ training steps, not a genuine representation failure.
 
 **Frozen route: attention-weighted pooling.** E1a / E1c (attention variants) are
 archived. All future readouts use mean pooling only (E0 linear or E1b mean+MLP).
+
+## E-1B bridge validation
+
+E-1B tests whether the Predictive v2 sparse encoder can learn **delayed cue → role
+associations** spanning multiple steps. The delayed-cue stream separates cue and
+verification by 5 filler steps. Cue and verify share a per-cycle context token so that
+some columns fire at both steps.
+
+### Stream design
+
+- **Phase 0 (cue):** token 100/101 (role-signaling), shared context per cycle
+- **Phases 1-4 (fillers):** random tokens, random context
+- **Phase 5 (verify):** token 300, same context as cue
+
+### Baseline result (no ledger, 100K steps)
+
+| Metric | Value | Interpretation |
+|---|---|---|
+| Cue-step voting accuracy | 76.3% | Encoder learns role from cue step (shared context) |
+| Verify-step voting accuracy | **51.9%** | Slightly above random — some columns generalize from cue to verify via shared context |
+
+### With minimal causal ledger (100K steps, gap=5)
+
+| Metric | Baseline | With ledger | Delta |
+|---|---|---|---|
+| Cue-step voting accuracy | 76.3% | 80.8% | **+4.5%** ✅ |
+| Verify-step voting accuracy | 51.9% | 51.1% | **-0.8%** ❌ |
+
+### Key finding
+
+The ledger reinforces **all** cue-step columns, including those that are token-specific
+(e.g., token 100/101) or position-specific (position_mod=0). These columns do not fire at
+verify step (different token, different position). Their boosted success_mass dilutes the
+competitive advantage of context-generalizing columns (which fire at both cue and verify),
+reducing verify-step accuracy.
+
+**Conclusion: Naive retrospective credit overfits to cue-step columns and hurts
+generalization.** A smarter ledger is needed — one that credits only columns whose inputs
+generalize across the delay gap (e.g., restricting credit to context-derived features).

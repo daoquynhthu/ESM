@@ -8,6 +8,7 @@ pub enum StreamKind {
     SameTokenContext,
     RoleSharing,
     DelayedRole,
+    DelayedCue,
 }
 
 impl StreamKind {
@@ -16,6 +17,7 @@ impl StreamKind {
             "same-token-context" | "same_token_context" | "context" => Some(Self::SameTokenContext),
             "role-sharing" | "role_sharing" | "sharing" => Some(Self::RoleSharing),
             "delayed-role" | "delayed_role" | "delayed" => Some(Self::DelayedRole),
+            "delayed-cue" | "delayed_cue" | "cue" => Some(Self::DelayedCue),
             _ => None,
         }
     }
@@ -25,6 +27,7 @@ impl StreamKind {
             Self::SameTokenContext => "same-token-context",
             Self::RoleSharing => "role-sharing",
             Self::DelayedRole => "delayed-role",
+            Self::DelayedCue => "delayed-cue",
         }
     }
 }
@@ -39,6 +42,7 @@ pub fn build_stream(kind: StreamKind, seed: u64) -> Box<dyn SyntheticStream> {
         StreamKind::SameTokenContext => Box::new(SameTokenContextStream::new(seed)),
         StreamKind::RoleSharing => Box::new(RoleSharingStream::new(seed)),
         StreamKind::DelayedRole => Box::new(DelayedRoleStream::new(seed)),
+        StreamKind::DelayedCue => Box::new(DelayedCueStream::new(seed)),
     }
 }
 
@@ -149,6 +153,75 @@ impl SyntheticStream for DelayedRoleStream {
         let target = TargetEvent {
             latent_role: self.current_role,
             next_token: if self.current_role == 0 { 700 } else { 900 },
+        };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+
+// =========================================================================
+// Delayed-cue stream (E-1B bridge)
+// =========================================================================
+
+/// 6-step cycle: [CUE, FILLER×4, VERIFY]
+///
+/// At step 0, a cue token (100 or 101) determines the latent role.
+/// Steps 1-4 are random filler tokens with random context (no role signal).
+/// At step 5, a verification token (300) appears with random context.
+/// The role is revealed via TargetEvent at every step (prequential protocol),
+/// but the verification step carries no token/context signal for the role,
+/// so the encoder must bridge the temporal gap without help from prototype
+/// context→role mappings.
+#[derive(Clone, Debug)]
+struct DelayedCueStream {
+    step: u64,
+    prev_token: u32,
+    current_role: u32,
+    cycle_context: u32,
+    rng: XorShift64,
+}
+
+impl DelayedCueStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, current_role: 0, cycle_context: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for DelayedCueStream {
+    fn name(&self) -> &'static str { "delayed-cue" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let phase = self.step % 6;
+        if phase == 0 {
+            self.current_role = self.rng.next_usize(2) as u32;
+            // Same context per cycle: shared between cue and verify
+            self.cycle_context = self.rng.next_usize(4096) as u32;
+        }
+
+        let token = match phase {
+            0 => if self.current_role == 0 { 100 } else { 101 },
+            1 | 2 | 3 | 4 => 200 + self.rng.next_usize(8) as u32,
+            _ => 300, // verification
+        };
+
+        let context_token = if phase == 0 || phase == 5 {
+            // Cue and verify share the same context
+            20000 + self.cycle_context
+        } else {
+            self.rng.next_usize(1024) as u32
+        };
+
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token,
+            position_mod: phase as u32,
+        };
+        let target = TargetEvent {
+            latent_role: self.current_role,
+            next_token: 0,
         };
         self.prev_token = token;
         self.step += 1;
