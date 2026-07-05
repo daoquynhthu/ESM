@@ -49,12 +49,15 @@ pub struct E1aMetrics {
     token_nll_sum: f64,
     code_nll_sum: f64,
     feature_vote_nll_sum: f64,
+    feature_vote_nll_no_proto_sum: f64,
     token_role: HashMap<u32, RoleCounts>,
     code_role: HashMap<u64, RoleCounts>,
     feature_role: HashMap<FeatureId, RoleCounts>,
     feature_usage: HashMap<FeatureId, u64>,
     active_bits_sum: u64,
     samples: Vec<CodeSample>,
+    proto_feature_offset: u32,
+    proto_feature_end: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -65,8 +68,10 @@ pub struct E1aReport {
     pub token_nll: f64,
     pub code_nll: f64,
     pub feature_vote_nll: f64,
+    pub feature_vote_nll_no_proto: f64,
     pub controlled_predictive_info: f64,
     pub controlled_feature_predictive_info: f64,
+    pub controlled_feature_predictive_info_no_proto: f64,
     pub same_token_context_split: f64,
     pub role_sharing: f64,
     pub code_entropy: f64,
@@ -76,6 +81,10 @@ pub struct E1aReport {
 
 impl E1aMetrics {
     pub fn new(max_roles: usize, sample_limit: usize) -> Self {
+        Self::with_prototype_range(max_roles, sample_limit, 0, 0)
+    }
+
+    pub fn with_prototype_range(max_roles: usize, sample_limit: usize, proto_offset: u32, proto_end: u32) -> Self {
         Self {
             max_roles,
             sample_limit,
@@ -83,12 +92,15 @@ impl E1aMetrics {
             token_nll_sum: 0.0,
             code_nll_sum: 0.0,
             feature_vote_nll_sum: 0.0,
+            feature_vote_nll_no_proto_sum: 0.0,
             token_role: HashMap::new(),
             code_role: HashMap::new(),
             feature_role: HashMap::new(),
             feature_usage: HashMap::new(),
             active_bits_sum: 0,
             samples: Vec::with_capacity(sample_limit.min(1024)),
+            proto_feature_offset: proto_offset,
+            proto_feature_end: proto_end,
         }
     }
 
@@ -107,10 +119,12 @@ impl E1aMetrics {
             .map(|c| c.nll(role))
             .unwrap_or_else(|| RoleCounts::new(self.max_roles).nll(role));
         let feature_vote_nll = self.feature_vote_nll(code, role);
+        let feature_vote_nll_no_proto = self.feature_vote_nll_filtered(code, role);
 
         self.token_nll_sum += token_nll;
         self.code_nll_sum += code_nll;
         self.feature_vote_nll_sum += feature_vote_nll;
+        self.feature_vote_nll_no_proto_sum += feature_vote_nll_no_proto;
         self.n = self.n.saturating_add(1);
         self.active_bits_sum = self.active_bits_sum.saturating_add(code.len() as u64);
 
@@ -141,6 +155,7 @@ impl E1aMetrics {
         let token_nll = self.token_nll_sum / n;
         let code_nll = self.code_nll_sum / n;
         let feature_vote_nll = self.feature_vote_nll_sum / n;
+        let feature_vote_nll_no_proto = self.feature_vote_nll_no_proto_sum / n;
         E1aReport {
             encoder: encoder.to_string(),
             stream: stream.to_string(),
@@ -148,8 +163,10 @@ impl E1aMetrics {
             token_nll,
             code_nll,
             feature_vote_nll,
+            feature_vote_nll_no_proto,
             controlled_predictive_info: token_nll - code_nll,
             controlled_feature_predictive_info: token_nll - feature_vote_nll,
+            controlled_feature_predictive_info_no_proto: token_nll - feature_vote_nll_no_proto,
             same_token_context_split: self.same_token_context_split(),
             role_sharing: self.role_sharing(),
             code_entropy: self.code_entropy(),
@@ -163,6 +180,30 @@ impl E1aMetrics {
         let mut role_mass = vec![1.0f64; self.max_roles];
         let mut total_mass = self.max_roles as f64;
         for f in code.as_slice() {
+            if let Some(counts) = self.feature_role.get(f) {
+                for (r, count) in counts.counts.iter().copied().enumerate() {
+                    if let Some(mass) = role_mass.get_mut(r) {
+                        *mass += count as f64;
+                    }
+                }
+                total_mass += counts.total as f64;
+            }
+        }
+        let p = role_mass.get(role).copied().unwrap_or(1.0) / total_mass.max(1.0);
+        -p.ln()
+    }
+
+    fn feature_vote_nll_filtered(&self, code: &SparseCode, role: usize) -> f64 {
+        if self.proto_feature_offset >= self.proto_feature_end {
+            // No prototype range configured, return the full version
+            return self.feature_vote_nll(code, role);
+        }
+        let mut role_mass = vec![1.0f64; self.max_roles];
+        let mut total_mass = self.max_roles as f64;
+        for f in code.as_slice() {
+            if f.0 >= self.proto_feature_offset && f.0 < self.proto_feature_end {
+                continue; // Skip prototype-only features
+            }
             if let Some(counts) = self.feature_role.get(f) {
                 for (r, count) in counts.counts.iter().copied().enumerate() {
                     if let Some(mass) = role_mass.get_mut(r) {
@@ -233,8 +274,10 @@ impl E1aReport {
                 "  \"token_nll\": {:.8},\n",
                 "  \"code_nll\": {:.8},\n",
                 "  \"feature_vote_nll\": {:.8},\n",
+                "  \"feature_vote_nll_no_proto\": {:.8},\n",
                 "  \"controlled_predictive_info\": {:.8},\n",
                 "  \"controlled_feature_predictive_info\": {:.8},\n",
+                "  \"controlled_feature_predictive_info_no_proto\": {:.8},\n",
                 "  \"same_token_context_split\": {:.8},\n",
                 "  \"role_sharing\": {:.8},\n",
                 "  \"code_entropy\": {:.8},\n",
@@ -248,8 +291,10 @@ impl E1aReport {
             self.token_nll,
             self.code_nll,
             self.feature_vote_nll,
+            self.feature_vote_nll_no_proto,
             self.controlled_predictive_info,
             self.controlled_feature_predictive_info,
+            self.controlled_feature_predictive_info_no_proto,
             self.same_token_context_split,
             self.role_sharing,
             self.code_entropy,

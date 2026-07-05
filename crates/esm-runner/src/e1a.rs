@@ -32,6 +32,13 @@ impl Default for E1aConfig {
     }
 }
 
+fn prototype_range(kind: EncoderKind) -> (u32, u32) {
+    match kind {
+        EncoderKind::D | EncoderKind::DNoTrace => (4_100_000, 4_100_000 + 2048),
+        _ => (0, 0),
+    }
+}
+
 pub fn run_e1a(cfg: E1aConfig) -> E1aReport {
     let enc_cfg = EncoderConfig {
         active_bits: cfg.active_bits,
@@ -42,7 +49,8 @@ pub fn run_e1a(cfg: E1aConfig) -> E1aReport {
     };
     let mut encoder = build_encoder(cfg.encoder, enc_cfg);
     let mut stream = build_stream(cfg.stream, cfg.seed ^ 0x5eed);
-    let mut metrics = E1aMetrics::new(cfg.max_roles, cfg.sample_limit);
+    let (proto_off, proto_end) = prototype_range(cfg.encoder);
+    let mut metrics = E1aMetrics::with_prototype_range(cfg.max_roles, cfg.sample_limit, proto_off, proto_end);
 
     for _ in 0..cfg.steps {
         let (input, target) = stream.next_sample();

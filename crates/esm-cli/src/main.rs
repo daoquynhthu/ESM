@@ -100,6 +100,6 @@ fn parse_usize(s: &str, name: &str) -> Result<usize, String> {
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  esm run e1a [--stream same-token-context|role-sharing|delayed-role] \\\n                  [--encoder hash|competitive|predictive] [--steps N] [--seed N]\n\nExamples:\n  esm run e1a --stream same-token-context --encoder hash --steps 10000\n  esm run e1a --stream same-token-context --encoder competitive --steps 10000\n  esm run e1a --stream same-token-context --encoder predictive --steps 10000"
+        "Usage:\n  esm run e1a [--stream same-token-context|role-sharing|delayed-role] \\\n                  [--encoder hash|competitive|predictive|d|d-no-trace|d-no-role-proto] \\\n                  [--steps N] [--seed N]\n\nExamples:\n  esm run e1a --stream same-token-context --encoder hash --steps 10000\n  esm run e1a --stream same-token-context --encoder d --steps 10000\n  esm run e1a --stream delayed-role --encoder d-no-trace --steps 10000"
     );
 }
