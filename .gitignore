@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+metrics/*.jsonl
+checkpoints/
+.DS_Store

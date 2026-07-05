@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/esm-core",
+    "crates/esm-runner",
+    "crates/esm-cli",
+    "crates/esm-tools",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "local"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"

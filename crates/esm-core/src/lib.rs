@@ -1,0 +1,15 @@
+//! Core data types and algorithms for the Elastic Sparse Machine E-1A lab.
+//!
+//! This crate intentionally has no third-party dependencies. It is safe Rust only.
+
+pub mod encoder;
+pub mod event;
+pub mod feature;
+pub mod ids;
+pub mod metrics;
+pub mod rng;
+
+pub use encoder::{EncoderConfig, EncoderKind, SparseEncoder};
+pub use event::{InputEvent, TargetEvent};
+pub use feature::{FeatureId, SparseCode};
+pub use metrics::{E1aMetrics, E1aReport};

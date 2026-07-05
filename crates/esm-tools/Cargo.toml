@@ -1,0 +1,11 @@
+[package]
+name = "esm-tools"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esm-core = { path = "../esm-core" }
