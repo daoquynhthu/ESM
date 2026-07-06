@@ -23,6 +23,10 @@ pub struct E1dConfig {
     pub genesis_surprise_floor: f32,
     pub genesis_probe_exploration_fraction: f32,
     pub genesis_coverage_overlap_min: f32,
+    pub genesis_cooldown_steps: u64,
+    pub genesis_coverage_margin_threshold: u32,
+    pub genesis_disagreement_rate_threshold: f32,
+    pub genesis_disagreement_window: u32,
 }
 
 impl Default for E1dConfig {
@@ -45,6 +49,10 @@ impl Default for E1dConfig {
             genesis_surprise_floor: 0.5,
             genesis_probe_exploration_fraction: 0.1,
             genesis_coverage_overlap_min: 0.3,
+            genesis_cooldown_steps: 50,
+            genesis_coverage_margin_threshold: 10,
+            genesis_disagreement_rate_threshold: 0.7,
+            genesis_disagreement_window: 50,
         }
     }
 }
@@ -59,6 +67,9 @@ pub struct E1dReport {
     pub active_element_count: usize,
     pub total_retired: u64,
     pub total_promoted: u64,
+    pub weak_parent_triggers: u64,
+    pub round0_triggers: u64,
+    pub final_parent_status: String,
     pub avg_utility: f64,
     pub avg_rent_paid: f64,
     pub coverage_rate: f64,
@@ -79,6 +90,9 @@ impl E1dReport {
              \"active_element_count\": {},\n\
              \"total_retired\": {},\n\
              \"total_promoted\": {},\n\
+             \"weak_parent_triggers\": {},\n\
+             \"round0_triggers\": {},\n\
+             \"final_parent_status\": \"{}\",\n\
              \"avg_utility\": {:.6},\n\
              \"avg_rent_paid\": {:.6},\n\
              \"coverage_rate\": {:.6},\n\
@@ -94,6 +108,9 @@ impl E1dReport {
             self.active_element_count,
             self.total_retired,
             self.total_promoted,
+            self.weak_parent_triggers,
+            self.round0_triggers,
+            self.final_parent_status,
             self.avg_utility,
             self.avg_rent_paid,
             self.coverage_rate,
@@ -126,6 +143,10 @@ pub fn run_e1d(cfg: E1dConfig) -> E1dReport {
         surprise_floor: cfg.genesis_surprise_floor,
         probe_exploration_fraction: cfg.genesis_probe_exploration_fraction,
         coverage_overlap_min: cfg.genesis_coverage_overlap_min,
+        cooldown_steps: cfg.genesis_cooldown_steps,
+        coverage_margin_threshold: cfg.genesis_coverage_margin_threshold,
+        disagreement_rate_threshold: cfg.genesis_disagreement_rate_threshold,
+        disagreement_window: cfg.genesis_disagreement_window,
     };
     let mut genesis = GenesisManager::new(genesis_cfg);
 
@@ -141,8 +162,9 @@ pub fn run_e1d(cfg: E1dConfig) -> E1dReport {
         let margins = encoder.column_role_margins();
         let feature_offset = encoder.feature_offset();
 
-        let encoder_surprise = encoder
-            .sparse_role_vote(&code)
+        let encoder_vote = encoder.sparse_role_vote(&code);
+
+        let encoder_surprise = encoder_vote
             .map(|(_, c)| -(c as f64).ln() as f32)
             .unwrap_or(0.0);
 
@@ -154,8 +176,6 @@ pub fn run_e1d(cfg: E1dConfig) -> E1dReport {
             cfg.max_roles,
         );
 
-        // Combined vote
-        let encoder_vote = encoder.sparse_role_vote(&code);
         let (element_votes, _, num_voters) = genesis.collect_votes(code.as_slice());
 
         let (predicted, _confidence) = combine_vote(encoder_vote, &element_votes, num_voters, cfg.max_roles);
@@ -167,7 +187,7 @@ pub fn run_e1d(cfg: E1dConfig) -> E1dReport {
         overall_nll_sum += -uniform_p.ln();
 
         encoder.adapt(&input, &target, &code);
-        genesis.after_adapt(code.as_slice(), target.latent_role as usize);
+        genesis.after_adapt(code.as_slice(), target.latent_role as usize, encoder_vote.map(|(r, _)| r));
         genesis.step_end();
 
         if genesis.genneses_this_step > 0 {
@@ -188,6 +208,9 @@ pub fn run_e1d(cfg: E1dConfig) -> E1dReport {
         active_element_count: report.active_element_count,
         total_retired: report.total_retired,
         total_promoted: report.total_promoted,
+        weak_parent_triggers: report.weak_parent_triggers,
+        round0_triggers: report.round0_triggers,
+        final_parent_status: format!("{:?}", report.final_parent_status),
         avg_utility: report.avg_utility,
         avg_rent_paid: report.avg_rent_paid,
         coverage_rate: report.coverage_rate,

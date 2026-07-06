@@ -201,6 +201,14 @@ pub struct GenesisConfig {
     pub probe_exploration_fraction: f32,
     /// Minimum overlap for an element to be considered "covering" current input.
     pub coverage_overlap_min: f32,
+    /// Steps to wait after a genesis event before triggering again.
+    pub cooldown_steps: u64,
+    /// Minimum column margin for a feature to be considered "explained".
+    pub coverage_margin_threshold: u32,
+    /// Min disagreement rate (0-1) in recent window to force genesis.
+    pub disagreement_rate_threshold: f32,
+    /// Size of the sliding window for tracking disagreement rate.
+    pub disagreement_window: u32,
 }
 
 impl Default for GenesisConfig {
@@ -216,6 +224,10 @@ impl Default for GenesisConfig {
             surprise_floor: 0.5,
             probe_exploration_fraction: 0.1,
             coverage_overlap_min: 0.3,
+            cooldown_steps: 50,
+            coverage_margin_threshold: 10,
+            disagreement_rate_threshold: 0.7,
+            disagreement_window: 50,
         }
     }
 }
@@ -453,24 +465,38 @@ pub struct GenesisManager {
     pub current_parent_status: ParentStatus,
     pub current_coverage: f32,
     pub genneses_this_step: usize,
+    pub cooldown_remaining: u64,
+    pub disagreement_window_buffer: Vec<bool>,
+    pub force_genesis_next: bool,
 
     // Lifetime aggregate metrics
     pub total_probes_created: u64,
     pub total_retired: u64,
     pub total_promoted: u64,
     pub total_activations: u64,
+    // Genesis kind counters
+    pub weak_parent_triggers: u64,
+    pub round0_triggers: u64,
+    pub final_parent_status: ParentStatus,
 }
 
 impl GenesisManager {
     pub fn new(config: GenesisConfig) -> Self {
+        let threshold = config.coverage_margin_threshold;
         Self {
             store: ElementStore::new(config),
-            coverage: CoverageTracker::new(3), // margin >= 3 = explained
+            coverage: CoverageTracker::new(threshold),
             step: 0,
             current_parent_status: ParentStatus::NoAdequateParent,
             current_coverage: 0.0,
             genneses_this_step: 0,
+            cooldown_remaining: 0,
+            disagreement_window_buffer: Vec::new(),
+            force_genesis_next: false,
             total_probes_created: 0,
+            weak_parent_triggers: 0,
+            round0_triggers: 0,
+            final_parent_status: ParentStatus::NoAdequateParent,
             total_retired: 0,
             total_promoted: 0,
             total_activations: 0,
@@ -490,6 +516,9 @@ impl GenesisManager {
     /// 1. Call at the beginning of every step, before encode.
     pub fn step_begin(&mut self) {
         self.genneses_this_step = 0;
+        if self.cooldown_remaining > 0 {
+            self.cooldown_remaining -= 1;
+        }
     }
 
     /// 2. Call after encoding. Checks coverage, updates parent status, triggers
@@ -517,14 +546,19 @@ impl GenesisManager {
 
         // 3. Compute parent status from existing elements
         self.current_parent_status = self.store.parent_status(code_features);
+        self.final_parent_status = self.current_parent_status;
 
-        // 4. Check genesis conditions
-        let should_genesis = self.current_coverage < 0.5
-            && surprise > self.store.config.surprise_floor
+        // 4. Check genesis conditions.
+        //    If force_genesis_next is set (persistent disagreements), bypass
+        //    surprise and coverage checks — the encoder is confidently wrong.
+        let should_genesis = self.cooldown_remaining == 0
+            && (self.force_genesis_next
+                || (self.current_coverage < 0.5 && surprise > self.store.config.surprise_floor))
             && (self.current_parent_status == ParentStatus::NoAdequateParent
                 || self.current_parent_status == ParentStatus::WeakParent)
             && self.store.can_genesis()
             && self.genneses_this_step < self.store.config.probes_per_step;
+        self.force_genesis_next = false;
 
         if should_genesis {
             // Create probe from the unexplained features
@@ -540,6 +574,11 @@ impl GenesisManager {
             if self.store.create_probe(features, 0, genesis_kind, lineage, num_roles).is_some() {
                 self.total_probes_created += 1;
                 self.genneses_this_step += 1;
+                match genesis_kind {
+                    GenesisKind::WeakParentRefinement => self.weak_parent_triggers += 1,
+                    _ => self.round0_triggers += 1,
+                }
+                self.cooldown_remaining = self.store.config.cooldown_steps;
             }
         }
     }
@@ -570,9 +609,32 @@ impl GenesisManager {
         (votes, total_weight, num_voters)
     }
 
-    /// 4. Call after adapt. Updates element role observations.
-    pub fn after_adapt(&mut self, code_features: &[FeatureId], actual_role: usize) {
+    /// 4. Call after adapt. Updates element role observations and tracks
+    ///    encoder prediction disagreements.
+    pub fn after_adapt(&mut self, code_features: &[FeatureId], actual_role: usize, predicted_role: Option<usize>) {
         self.store.observe_active_elements(code_features, actual_role, self.step);
+        self.track_prediction_disagreement(predicted_role, actual_role);
+    }
+
+    /// Track encoder prediction disagreements in a sliding window.
+    /// If the disagreement rate exceeds the threshold, force genesis.
+    fn track_prediction_disagreement(&mut self, predicted_role: Option<usize>, actual_role: usize) {
+        let window = self.store.config.disagreement_window as usize;
+        let is_wrong = match predicted_role {
+            Some(pred) => pred != actual_role,
+            None => true, // No prediction = no vote = can't be right
+        };
+        self.disagreement_window_buffer.push(is_wrong);
+        if self.disagreement_window_buffer.len() > window {
+            self.disagreement_window_buffer.remove(0);
+        }
+        if self.disagreement_window_buffer.len() >= window {
+            let wrong_count = self.disagreement_window_buffer.iter().filter(|&w| *w).count();
+            let rate = wrong_count as f32 / window as f32;
+            if rate >= self.store.config.disagreement_rate_threshold {
+                self.force_genesis_next = true;
+            }
+        }
     }
 
     /// 5. Call at end of step. Pays rent, promotes, retires.
@@ -595,6 +657,9 @@ impl GenesisManager {
             active_element_count: self.store.active_count(),
             total_retired: self.total_retired,
             total_promoted: self.total_promoted,
+            weak_parent_triggers: self.weak_parent_triggers,
+            round0_triggers: self.round0_triggers,
+            final_parent_status: self.final_parent_status,
             avg_utility: self.store.elements.iter()
                 .filter(|e| e.phase == ElementPhase::Active || e.phase == ElementPhase::Probe)
                 .map(|e| e.utility as f64)
@@ -617,13 +682,16 @@ pub struct GenesisReport {
     pub active_element_count: usize,
     pub total_retired: u64,
     pub total_promoted: u64,
+    pub weak_parent_triggers: u64,
+    pub round0_triggers: u64,
+    pub final_parent_status: ParentStatus,
     pub avg_utility: f64,
     pub avg_rent_paid: f64,
     pub coverage_rate: f64,
 }
 
 impl GenesisReport {
-    pub fn to_json_pretty(&self) -> String {
+    pub     fn to_json_pretty(&self) -> String {
         format!(
             "{{\n\
              \"total_probes_created\": {},\n\
@@ -631,6 +699,9 @@ impl GenesisReport {
              \"active_element_count\": {},\n\
              \"total_retired\": {},\n\
              \"total_promoted\": {},\n\
+             \"weak_parent_triggers\": {},\n\
+             \"round0_triggers\": {},\n\
+             \"final_parent_status\": {:?},\n\
              \"avg_utility\": {:.6},\n\
              \"avg_rent_paid\": {:.6},\n\
              \"coverage_rate\": {:.6}\n\
@@ -640,6 +711,9 @@ impl GenesisReport {
             self.active_element_count,
             self.total_retired,
             self.total_promoted,
+            self.weak_parent_triggers,
+            self.round0_triggers,
+            self.final_parent_status,
             self.avg_utility,
             self.avg_rent_paid,
             self.coverage_rate,

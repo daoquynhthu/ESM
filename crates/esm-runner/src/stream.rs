@@ -541,6 +541,8 @@ pub enum E1dStreamKind {
     EmptyField,
     NovelPattern,
     RareEvent,
+    WeakParent,
+    CompositionGap,
 }
 
 impl E1dStreamKind {
@@ -549,6 +551,8 @@ impl E1dStreamKind {
             "empty-field" | "empty" => Some(Self::EmptyField),
             "novel-pattern" | "novel" => Some(Self::NovelPattern),
             "rare-event" | "rare" => Some(Self::RareEvent),
+            "weak-parent" | "weak" => Some(Self::WeakParent),
+            "composition-gap" | "compgap" | "cogap" => Some(Self::CompositionGap),
             _ => None,
         }
     }
@@ -558,6 +562,8 @@ impl E1dStreamKind {
             Self::EmptyField => "empty-field",
             Self::NovelPattern => "novel-pattern",
             Self::RareEvent => "rare-event",
+            Self::WeakParent => "weak-parent",
+            Self::CompositionGap => "composition-gap",
         }
     }
 }
@@ -567,6 +573,8 @@ pub fn build_e1d_stream(kind: E1dStreamKind, seed: u64) -> Box<dyn SyntheticStre
         E1dStreamKind::EmptyField => Box::new(E1dEmptyFieldStream::new(seed)),
         E1dStreamKind::NovelPattern => Box::new(E1dNovelPatternStream::new(seed)),
         E1dStreamKind::RareEvent => Box::new(E1dRareEventStream::new(seed)),
+        E1dStreamKind::WeakParent => Box::new(E1dWeakParentStream::new(seed)),
+        E1dStreamKind::CompositionGap => Box::new(E1dCompositionGapStream::new(seed)),
     }
 }
 
@@ -697,6 +705,86 @@ impl SyntheticStream for E1dRareEventStream {
             position_mod: phase as u32,
         };
         let target = TargetEvent { latent_role: self.current_role, next_token: 0 };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+
+/// Two interleaved patterns with overlapping encoder features.
+/// Pattern A: token=100, ctx=500, role=0 (odd steps)
+/// Pattern B: token=100, ctx=501, role=1 (even steps)
+/// Same token → encoder fires partially overlapping columns.
+/// Elements from A partially cover B events → WeakParent status.
+struct E1dWeakParentStream {
+    step: u64,
+    prev_token: u32,
+    _rng: XorShift64,
+}
+
+impl E1dWeakParentStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, _rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for E1dWeakParentStream {
+    fn name(&self) -> &'static str { "weak-parent" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let phase = self.step % 2;
+        let (token, context, role) = if phase == 0 {
+            (100u32, 500u32, 0u32)
+        } else {
+            (100u32, 501u32, 1u32)
+        };
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token: context,
+            position_mod: (self.step % 8) as u32,
+        };
+        let target = TargetEvent { latent_role: role, next_token: 0 };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+
+/// Pairwise XOR from step 0: role = token_bit XOR prev_bit.
+/// No noise phase — starts immediately with the composition puzzle.
+/// Encoder struggles (D≥2 needed) → coverage low → genesis triggers.
+struct E1dCompositionGapStream {
+    step: u64,
+    prev_token: u32,
+    rng: XorShift64,
+}
+
+impl E1dCompositionGapStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for E1dCompositionGapStream {
+    fn name(&self) -> &'static str { "composition-gap" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let next_prev = self.prev_token;
+        let token = if self.rng.next_usize(2) == 0 { 100 } else { 101 };
+        let context = 200u32;
+        let token_bit = (token != 100) as u32;
+        let prev_bit = (next_prev != 100) as u32;
+        let role = token_bit ^ prev_bit;
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token: context,
+            position_mod: (self.step % 8) as u32,
+        };
+        let target = TargetEvent { latent_role: role, next_token: 0 };
         self.prev_token = token;
         self.step += 1;
         (input, target)
