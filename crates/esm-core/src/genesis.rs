@@ -1,5 +1,5 @@
 use crate::feature::FeatureId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ElementPhase {
@@ -385,5 +385,266 @@ impl ElementStore {
         }
 
         (votes, total_weight)
+    }
+}
+
+// ============================================================================
+// GenesisManager — step-level integration API
+// ============================================================================
+
+/// Tracks encoder column coverage to detect unexplained patterns.
+#[derive(Clone, Debug)]
+pub struct CoverageTracker {
+    /// Per-column role margin history (best - second_best) from the encoder's
+    /// `role_counts_by_column`. A column with margin >= threshold is "explained".
+    column_margins: HashMap<u64, u32>,
+    threshold: u32,
+}
+
+impl CoverageTracker {
+    pub fn new(threshold: u32) -> Self {
+        Self { column_margins: HashMap::new(), threshold }
+    }
+
+    /// Feed the encoder's role_counts_by_column to update margins.
+    pub fn observe_column_margins(&mut self, margins: &[u32]) {
+        self.column_margins.clear();
+        for (idx, &margin) in margins.iter().enumerate() {
+            self.column_margins.insert(idx as u64, margin);
+        }
+    }
+
+    /// Is a given encoder column "explained" (has sufficient role margin)?
+    pub fn is_explained(&self, col_idx: u64) -> bool {
+        self.column_margins.get(&col_idx).copied().unwrap_or(0) >= self.threshold
+    }
+
+    /// What fraction of `code_features` (that are encoder columns) is explained?
+    pub fn coverage_fraction(&self, code_features: &[FeatureId], feature_offset: u32) -> f32 {
+        let mut total = 0usize;
+        let mut explained = 0usize;
+        for fid in code_features {
+            if fid.0 >= feature_offset {
+                let idx = (fid.0 - feature_offset) as u64;
+                total += 1;
+                if self.is_explained(idx) {
+                    explained += 1;
+                }
+            }
+        }
+        if total == 0 { 1.0 } else { explained as f32 / total as f32 }
+    }
+}
+
+/// Step-level GenesisManager that the E-1D runner calls at each step.
+///
+/// Integration points in the runner's step loop:
+/// 1. `step_begin()` — reset per-step counters
+/// 2. `after_encode(code_features, encoder_margins, surprise)` — check coverage,
+///    update parent_status, trigger genesis if conditions met
+/// 3. `collect_votes(code_features)` — get element votes (merged with encoder vote)
+/// 4. `after_adapt(code_features, actual_role)` — update element role knowledge
+/// 5. `step_end()` — pay rent, lifecycle
+#[derive(Clone, Debug)]
+pub struct GenesisManager {
+    pub store: ElementStore,
+    pub coverage: CoverageTracker,
+    step: u64,
+    pub current_parent_status: ParentStatus,
+    pub current_coverage: f32,
+    pub genneses_this_step: usize,
+
+    // Lifetime aggregate metrics
+    pub total_probes_created: u64,
+    pub total_retired: u64,
+    pub total_promoted: u64,
+    pub total_activations: u64,
+}
+
+impl GenesisManager {
+    pub fn new(config: GenesisConfig) -> Self {
+        Self {
+            store: ElementStore::new(config),
+            coverage: CoverageTracker::new(3), // margin >= 3 = explained
+            step: 0,
+            current_parent_status: ParentStatus::NoAdequateParent,
+            current_coverage: 0.0,
+            genneses_this_step: 0,
+            total_probes_created: 0,
+            total_retired: 0,
+            total_promoted: 0,
+            total_activations: 0,
+        }
+    }
+
+    pub fn genesis_config(&self) -> &GenesisConfig {
+        &self.store.config
+    }
+
+    pub fn genesis_config_mut(&mut self) -> &mut GenesisConfig {
+        &mut self.store.config
+    }
+
+    // ─── Per-step API ───────────────────────────────────────────────────────
+
+    /// 1. Call at the beginning of every step, before encode.
+    pub fn step_begin(&mut self) {
+        self.genneses_this_step = 0;
+    }
+
+    /// 2. Call after encoding. Checks coverage, updates parent status, triggers
+    ///    genesis if unexplained patterns are found.
+    ///
+    /// `code_features` — the sparse code from the encoder.
+    /// `encoder_column_margins` — per-column role margin (best - second_best)
+    ///    from the encoder's role_counts_by_column.
+    /// `surprise` — NLL of the encoder's prediction at this step (or 0 if no vote).
+    /// `feature_offset` — the encoder's feature offset (e.g., 4_000_000).
+    /// `num_roles` — max number of roles.
+    pub fn after_encode(
+        &mut self,
+        code_features: &[FeatureId],
+        encoder_column_margins: &[u32],
+        surprise: f32,
+        feature_offset: u32,
+        num_roles: usize,
+    ) {
+        // 1. Update coverage tracker with current column margins
+        self.coverage.observe_column_margins(encoder_column_margins);
+
+        // 2. Compute coverage fraction of this code
+        self.current_coverage = self.coverage.coverage_fraction(code_features, feature_offset);
+
+        // 3. Compute parent status from existing elements
+        self.current_parent_status = self.store.parent_status(code_features);
+
+        // 4. Check genesis conditions
+        let should_genesis = self.current_coverage < 0.5
+            && surprise > self.store.config.surprise_floor
+            && (self.current_parent_status == ParentStatus::NoAdequateParent
+                || self.current_parent_status == ParentStatus::WeakParent)
+            && self.store.can_genesis()
+            && self.genneses_this_step < self.store.config.probes_per_step;
+
+        if should_genesis {
+            // Create probe from the unexplained features
+            let features: Vec<FeatureId> = code_features.to_vec();
+            let genesis_kind = match self.current_parent_status {
+                ParentStatus::WeakParent => GenesisKind::WeakParentRefinement,
+                _ => GenesisKind::Round0,
+            };
+            let lineage = match genesis_kind {
+                GenesisKind::WeakParentRefinement => Lineage::WeakParentRefinement,
+                _ => Lineage::Root,
+            };
+            if self.store.create_probe(features, 0, genesis_kind, lineage, num_roles).is_some() {
+                self.total_probes_created += 1;
+                self.genneses_this_step += 1;
+            }
+        }
+    }
+
+    /// 3. Collect element votes for the combined role prediction.
+    ///    Returns (votes_per_role, total_confidence_weight, num_voting_elements).
+    pub fn collect_votes(&self, code_features: &[FeatureId]) -> (Vec<u32>, f32, usize) {
+        let mut votes = vec![0u32; 2];
+        let mut total_weight = 0.0f32;
+        let mut num_voters = 0usize;
+
+        for elem in self.store.elements.iter() {
+            if elem.phase == ElementPhase::Retired || elem.phase == ElementPhase::Quarantined {
+                continue;
+            }
+            if let Some((role, confidence)) = elem.vote(code_features) {
+                let needed = role + 1;
+                if votes.len() < needed {
+                    votes.resize(needed, 0);
+                }
+                let weight = (confidence * 10.0).max(1.0) as u32;
+                votes[role] = votes[role].saturating_add(weight);
+                total_weight += confidence;
+                num_voters += 1;
+            }
+        }
+
+        (votes, total_weight, num_voters)
+    }
+
+    /// 4. Call after adapt. Updates element role observations.
+    pub fn after_adapt(&mut self, code_features: &[FeatureId], actual_role: usize) {
+        self.store.observe_active_elements(code_features, actual_role, self.step);
+    }
+
+    /// 5. Call at end of step. Pays rent, promotes, retires.
+    pub fn step_end(&mut self) {
+        let before_retired = self.store.total_retired;
+        self.store.step_lifecycle();
+        let after_retired = self.store.total_retired;
+        self.total_retired = after_retired - before_retired;
+        self.total_promoted = self.store.total_promoted;
+        self.total_activations = self.store.elements.iter()
+            .filter(|e| e.last_activation == self.step)
+            .count() as u64;
+        self.step += 1;
+    }
+
+    // ─── Reporting ──────────────────────────────────────────────────────────
+
+    pub fn report(&self) -> GenesisReport {
+        GenesisReport {
+            total_probes_created: self.total_probes_created,
+            current_probe_count: self.store.probe_count(),
+            active_element_count: self.store.active_count(),
+            total_retired: self.total_retired,
+            total_promoted: self.total_promoted,
+            avg_utility: self.store.elements.iter()
+                .filter(|e| e.phase == ElementPhase::Active || e.phase == ElementPhase::Probe)
+                .map(|e| e.utility as f64)
+                .sum::<f64>()
+                .max(0.0)
+                / (self.store.elements.len().max(1) as f64),
+            avg_rent_paid: self.store.elements.iter()
+                .map(|e| e.rent_paid as f64)
+                .sum::<f64>()
+                / (self.store.elements.len().max(1) as f64),
+            coverage_rate: self.current_coverage as f64,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct GenesisReport {
+    pub total_probes_created: u64,
+    pub current_probe_count: usize,
+    pub active_element_count: usize,
+    pub total_retired: u64,
+    pub total_promoted: u64,
+    pub avg_utility: f64,
+    pub avg_rent_paid: f64,
+    pub coverage_rate: f64,
+}
+
+impl GenesisReport {
+    pub fn to_json_pretty(&self) -> String {
+        format!(
+            "{{\n\
+             \"total_probes_created\": {},\n\
+             \"current_probe_count\": {},\n\
+             \"active_element_count\": {},\n\
+             \"total_retired\": {},\n\
+             \"total_promoted\": {},\n\
+             \"avg_utility\": {:.6},\n\
+             \"avg_rent_paid\": {:.6},\n\
+             \"coverage_rate\": {:.6}\n\
+             }}",
+            self.total_probes_created,
+            self.current_probe_count,
+            self.active_element_count,
+            self.total_retired,
+            self.total_promoted,
+            self.avg_utility,
+            self.avg_rent_paid,
+            self.coverage_rate,
+        )
     }
 }
