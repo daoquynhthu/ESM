@@ -6,6 +6,7 @@ pub mod claims;
 pub mod encoder;
 pub mod event;
 pub mod feature;
+pub mod genesis;
 pub mod ids;
 pub mod ledger;
 pub mod metrics;
