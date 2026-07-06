@@ -5,7 +5,7 @@ use crate::event::{InputEvent, TargetEvent};
 use crate::feature::{FeatureId, SparseCode};
 use crate::rng::mix64;
 
-pub fn dominant_role(counts: &[u32], max_roles: usize) -> Option<(usize, u32, u32)> {
+fn dominant_role(counts: &[u32], max_roles: usize) -> Option<(usize, u32, u32)> {
     let mut best_role = 0usize;
     let mut best = 0u32;
     let mut second = 0u32;
@@ -21,28 +21,47 @@ pub fn dominant_role(counts: &[u32], max_roles: usize) -> Option<(usize, u32, u3
     if best == 0 { None } else { Some((best_role, best, second)) }
 }
 
-fn context_sketch_terms(input: &InputEvent) -> [SketchTerm; 8] {
+/// Sketch terms for composition depth.
+///
+/// Balanced weights: no single term dominates. All interaction terms are as
+/// strong as or stronger than the individual terms they compose. This ensures
+/// conjunctive columns (from interaction terms) compete fairly with singleton
+/// columns in the top-k selection.
+///
+/// Includes a triple interaction term (token ^ ctx ^ prev) that enables
+/// 3-way compositional patterns (nested dependency, D=3).
+fn composition_sketch_terms(input: &InputEvent) -> [SketchTerm; 9] {
     [
-        SketchTerm { value: 0x00_0000_0000u64 | input.token as u64, weight: 2, fanout: 4 },
-        SketchTerm { value: 0x10_0000_0000u64 | input.prev_token as u64, weight: 1, fanout: 2 },
-        SketchTerm { value: 0x20_0000_0000u64 | input.context_token as u64, weight: 30, fanout: 20 },
-        SketchTerm { value: 0x30_0000_0000u64 | input.position_mod as u64, weight: 1, fanout: 2 },
+        SketchTerm { value: 0x00_0000_0000u64 | input.token as u64, weight: 7, fanout: 10 },
+        SketchTerm { value: 0x10_0000_0000u64 | input.prev_token as u64, weight: 4, fanout: 6 },
+        SketchTerm { value: 0x20_0000_0000u64 | input.context_token as u64, weight: 9, fanout: 12 },
+        SketchTerm { value: 0x30_0000_0000u64 | input.position_mod as u64, weight: 3, fanout: 4 },
         SketchTerm {
             value: 0x40_0000_0000u64 | (((input.token as u64) << 32) ^ input.prev_token as u64),
-            weight: 1,
-            fanout: 2,
+            weight: 5,
+            fanout: 6,
         },
         SketchTerm {
             value: 0x50_0000_0000u64 | (((input.token as u64) << 32) ^ input.context_token as u64),
-            weight: 8,
+            weight: 10,
             fanout: 12,
         },
         SketchTerm {
             value: 0x60_0000_0000u64 | (((input.prev_token as u64) << 32) ^ input.context_token as u64),
-            weight: 2,
-            fanout: 4,
+            weight: 5,
+            fanout: 6,
         },
-        SketchTerm { value: 0, weight: 0, fanout: 0 },
+        // Triple interaction: token ^ ctx ^ prev enables nested composition (D=3).
+        SketchTerm {
+            value: 0x70_0000_0000u64 | ((((input.token as u64) << 32) ^ ((input.context_token as u64) << 16)) ^ input.prev_token as u64),
+            weight: 12,
+            fanout: 12,
+        },
+        SketchTerm {
+            value: 0x80_0000_0000u64 | ((input.step & 0xff) ^ ((input.position_mod as u64) << 16)),
+            weight: 1,
+            fanout: 2,
+        },
     ]
 }
 
@@ -54,7 +73,7 @@ struct SketchTerm {
 }
 
 #[derive(Clone, Debug)]
-pub struct ContextPredictiveEncoder {
+pub struct CompositionPredictiveEncoder {
     pub columns: Vec<Column>,
     pub active_bits: usize,
     pub feature_offset: u32,
@@ -65,7 +84,7 @@ pub struct ContextPredictiveEncoder {
     pub max_roles: usize,
 }
 
-impl ContextPredictiveEncoder {
+impl CompositionPredictiveEncoder {
     pub fn new(cfg: EncoderConfig) -> Self {
         let columns = (0..cfg.columns).map(|_| Column::new()).collect();
         Self {
@@ -83,7 +102,7 @@ impl ContextPredictiveEncoder {
     fn projected_scores(&self, input: &InputEvent) -> Vec<i32> {
         let n = self.columns.len().max(1);
         let mut scores = vec![0i32; n];
-        for (term_idx, term) in context_sketch_terms(input).iter().enumerate() {
+        for (term_idx, term) in composition_sketch_terms(input).iter().enumerate() {
             for salt in 0..term.fanout {
                 let h = mix64(term.value ^ self.seed ^ ((term_idx as u64) << 32) ^ salt as u64);
                 let idx = (h % n as u64) as usize;
@@ -93,10 +112,9 @@ impl ContextPredictiveEncoder {
             }
         }
 
-        // No usage homeostasis: context-dominant encoder needs the SAME
-        // columns to fire repeatedly. Homeostasis forces alternation,
-        // which destroys the cue→verify column overlap that the ledger
-        // depends on.
+        // No usage homeostasis: composition columns must fire repeatedly to
+        // accumulate consistent role counts. Homeostasis forces column rotation,
+        // which destroys conjunctive columns that carry compositional signal.
         for (idx, col) in self.columns.iter().enumerate() {
             scores[idx] = scores[idx].saturating_add(col.success_mass.round() as i32);
             scores[idx] = scores[idx].saturating_add(col.credit_bias);
@@ -113,9 +131,9 @@ impl ContextPredictiveEncoder {
     }
 }
 
-impl SparseEncoder for ContextPredictiveEncoder {
+impl SparseEncoder for CompositionPredictiveEncoder {
     fn name(&self) -> &'static str {
-        "context-predictive"
+        "composition-predictive"
     }
 
     fn sparse_role_vote(&self, code: &SparseCode) -> Option<(usize, f32)> {
@@ -172,12 +190,6 @@ impl SparseEncoder for ContextPredictiveEncoder {
         _cue_step: u64,
         verified_role: usize,
     ) {
-        // Unconditionally add role counts to ALL cue-step features.
-        // Since cue and verify share the same context, the same columns
-        // fire at both steps. The extra counts from verify reinforce
-        // what the column learned at cue step.
-        // CRITICAL: Do NOT modify success_mass. Mass changes cause
-        // columns to fire in wrong contexts (cross-context pollution).
         for fid in cue_features {
             if fid.0 < self.feature_offset {
                 continue;

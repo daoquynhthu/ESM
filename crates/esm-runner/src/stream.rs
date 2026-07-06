@@ -10,6 +10,9 @@ pub enum StreamKind {
     DelayedRole,
     DelayedCue,
     DelayedCueVerifyOnly,
+    DelayedCueFixedContext,
+    DelayedCueCyclingContext,
+    CompositionDepth(usize),
 }
 
 impl StreamKind {
@@ -20,6 +23,11 @@ impl StreamKind {
             "delayed-role" | "delayed_role" | "delayed" => Some(Self::DelayedRole),
             "delayed-cue" | "delayed_cue" | "cue" => Some(Self::DelayedCue),
             "delayed-cue-verify-only" | "verify-only" | "verifyonly" => Some(Self::DelayedCueVerifyOnly),
+            "delayed-cue-fixed-context" | "fixed-context" | "fixedctx" => Some(Self::DelayedCueFixedContext),
+            "delayed-cue-cycling-context" | "cycling-context" | "cycling" => Some(Self::DelayedCueCyclingContext),
+            "composition-depth-1" | "comp1" | "d1" => Some(Self::CompositionDepth(1)),
+            "composition-depth-2" | "comp2" | "d2" => Some(Self::CompositionDepth(2)),
+            "composition-depth-3" | "comp3" | "d3" => Some(Self::CompositionDepth(3)),
             _ => None,
         }
     }
@@ -31,6 +39,16 @@ impl StreamKind {
             Self::DelayedRole => "delayed-role",
             Self::DelayedCue => "delayed-cue",
             Self::DelayedCueVerifyOnly => "delayed-cue-verify-only",
+            Self::DelayedCueFixedContext => "delayed-cue-fixed-context",
+            Self::DelayedCueCyclingContext => "delayed-cue-cycling-context",
+            Self::CompositionDepth(d) => {
+                // Static lifetime; we have exactly 3 valid depths.
+                match d {
+                    1 => "composition-depth-1",
+                    2 => "composition-depth-2",
+                    _ => "composition-depth-3",
+                }
+            }
         }
     }
 }
@@ -47,6 +65,9 @@ pub fn build_stream(kind: StreamKind, seed: u64) -> Box<dyn SyntheticStream> {
         StreamKind::DelayedRole => Box::new(DelayedRoleStream::new(seed)),
         StreamKind::DelayedCue => Box::new(DelayedCueStream::new(seed)),
         StreamKind::DelayedCueVerifyOnly => Box::new(DelayedCueVerifyOnlyStream::new(seed)),
+        StreamKind::DelayedCueFixedContext => Box::new(DelayedCueFixedContextStream::new(seed)),
+        StreamKind::DelayedCueCyclingContext => Box::new(DelayedCueCyclingContextStream::new(seed)),
+        StreamKind::CompositionDepth(d) => Box::new(CompositionDepthStream::new(seed, d)),
     }
 }
 
@@ -291,6 +312,222 @@ impl SyntheticStream for DelayedCueVerifyOnlyStream {
         };
         self.prev_token = token;
         self.step += 1;
+        (input, target)
+    }
+}
+
+/// Delayed-cue stream with FIXED context per role and verify-only reveal.
+/// Role 0 → context 30000, Role 1 → context 30001.
+/// Same context at cue and verify for each role.
+/// Role revealed ONLY at verify step (noise at cue/filler).
+/// This enables cross-cycle ledger accumulation: the same columns fire
+/// every time the same role occurs, so ledger counts accumulate.
+struct DelayedCueFixedContextStream {
+    step: u64,
+    prev_token: u32,
+    current_role: u32,
+    current_filler: u32,
+    rng: XorShift64,
+}
+
+impl DelayedCueFixedContextStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, current_role: 0, current_filler: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for DelayedCueFixedContextStream {
+    fn name(&self) -> &'static str { "delayed-cue-fixed-context" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let phase = self.step % 6;
+        if phase == 0 {
+            self.current_role = self.rng.next_usize(2) as u32;
+            self.current_filler = self.rng.next_usize(8) as u32;
+        }
+
+        let token = match phase {
+            0 => 100 + self.current_role,
+            1 | 2 | 3 | 4 => 200 + self.current_filler,
+            _ => 300,
+        };
+
+        // Fixed context per role: cue and verify share the SAME role-specific context.
+        // Context values are widely separated (30000 vs 31000) to avoid XOR collision
+        // in the sketch hash with seed=1. Adjacent values (30000/30001) collide because
+        // term.value ^ seed ^ (term_idx<<32) swaps the hash inputs between roles.
+        let context_token: u32 = match phase {
+            0 | 5 => 30000 + self.current_role * 1000,
+            _ => 40000 + self.current_filler,
+        };
+
+        let reveal_role = phase == 5;
+        let role = if reveal_role { self.current_role } else { self.rng.next_usize(2) as u32 };
+
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token,
+            position_mod: phase as u32,
+        };
+        let target = TargetEvent {
+            latent_role: role,
+            next_token: 0,
+        };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+/// Delayed-cue stream with 8 CYCLING contexts.
+///
+/// Each cycle gets a cycling context index (0..7) that repeats every 8 cycles.
+/// Within a cycle, cue and verify share the same cycling context, but the role
+/// determines the exact context value:
+///   Role 0: context = 30000 + ctx_idx * 1000
+///   Role 1: context = 30000 + ctx_idx * 1000 + 500
+///
+/// Contexts repeat every 8 cycles, enabling cross-cycle column reuse while
+/// still being more challenging than the fixed-context stream.
+struct DelayedCueCyclingContextStream {
+    step: u64,
+    prev_token: u32,
+    current_role: u32,
+    cycle_ctx: u32,
+    cycle_idx: u64,
+    rng: XorShift64,
+}
+
+impl DelayedCueCyclingContextStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, current_role: 0, cycle_ctx: 0, cycle_idx: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for DelayedCueCyclingContextStream {
+    fn name(&self) -> &'static str { "delayed-cue-cycling-context" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let phase = self.step % 6;
+        if phase == 0 {
+            self.current_role = self.rng.next_usize(2) as u32;
+            self.cycle_ctx = (self.cycle_idx % 8) as u32;
+            self.cycle_idx += 1;
+        }
+
+        let token = match phase {
+            0 => 100 + self.current_role,
+            1 | 2 | 3 | 4 => 200 + self.rng.next_usize(8) as u32,
+            _ => 300,
+        };
+
+        // Role determines exact context value within cycling context bucket.
+        // 8 cycling contexts × 2 roles = 16 distinct context values.
+        let context_token = match phase {
+            0 | 5 => 30000 + self.cycle_ctx * 1000 + self.current_role * 500,
+            _ => 40000 + self.rng.next_usize(8) as u32,
+        };
+
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token,
+            position_mod: phase as u32,
+        };
+        let target = TargetEvent {
+            latent_role: self.current_role,
+            next_token: 0,
+        };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+
+// =========================================================================
+// Composition-depth stream (Gate E-1C)
+// =========================================================================
+//
+// Tests whether the encoder is a single-layer threshold detector (D=1) or
+// can exploit pairwise (D=2) and triple (D=3) compositional structure.
+//
+// D=1 (control): token=100, context=200 always. Role = random 50/50.
+//   All columns fire identically every step → ~50% accuracy.
+//
+// D=2 (pairwise XOR): token∈{100,101}, context∈{10,20}.
+//   Role = XOR(token_bit, context_bit).
+//   Individual terms 50/50, token^ctx term deterministic → 100%.
+//
+// D=3 (triple XOR): token∈{100,101}, context∈{10,20}, prev∈{1000,2000}.
+//   Role = XOR(token_bit, context_bit, prev_bit).
+//   All pairwise terms 50/50, no triple hash term → ~50%.
+//
+// Pass condition: D=2 accuracy > D=1 accuracy (compositional disambiguation).
+struct CompositionDepthStream {
+    step: u64,
+    prev_token: u32,
+    rng: XorShift64,
+    depth: usize,
+}
+
+impl CompositionDepthStream {
+    fn new(seed: u64, depth: usize) -> Self {
+        Self { step: 0, prev_token: 0, rng: XorShift64::new(seed), depth }
+    }
+}
+
+impl SyntheticStream for CompositionDepthStream {
+    fn name(&self) -> &'static str {
+        match self.depth {
+            1 => "composition-depth-1",
+            2 => "composition-depth-2",
+            _ => "composition-depth-3",
+        }
+    }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let (token, context_token, prev_token, role) = match self.depth {
+            // D=1: no compositional signal, token+context always same
+            1 => {
+                let token = 100u32;
+                let context = 200u32;
+                let role = self.rng.next_usize(2) as u32;
+                (token, context, 0u32, role)
+            }
+            // D=2: pairwise XOR — individual terms 50/50, token^ctx deterministic
+            2 => {
+                let token = if self.rng.next_usize(2) == 0 { 100 } else { 101 };
+                let context = if self.rng.next_usize(2) == 0 { 10 } else { 20 };
+                let token_bit = (token != 100) as u32;
+                let ctx_bit = (context != 10) as u32;
+                let role = token_bit ^ ctx_bit;
+                (token, context, 0u32, role)
+            }
+            // D=3: triple XOR — all pairwise 50/50, no triple hash term
+            _ => {
+                let token = if self.rng.next_usize(2) == 0 { 100 } else { 101 };
+                let context = if self.rng.next_usize(2) == 0 { 10 } else { 20 };
+                let prev = if self.rng.next_usize(2) == 0 { 1000 } else { 2000 };
+                let token_bit = (token != 100) as u32;
+                let ctx_bit = (context != 10) as u32;
+                let prev_bit = (prev != 1000) as u32;
+                let role = token_bit ^ ctx_bit ^ prev_bit;
+                (token, context, prev, role)
+            }
+        };
+
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token,
+            context_token,
+            position_mod: 0,
+        };
+        let target = TargetEvent { latent_role: role, next_token: 0 };
+        self.step += 1;
+        self.prev_token = token;
         (input, target)
     }
 }

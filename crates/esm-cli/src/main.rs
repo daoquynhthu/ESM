@@ -121,9 +121,54 @@ fn run_e1b_cmd(args: &[String]) -> Result<(), String> {
                 cfg.seed = parse_u64(value, "seed")?;
                 i += 2;
             }
-            "--ledger-gap" => {
+            "--claim-gap" => {
                 let value = take_value(args, i)?;
-                cfg.ledger_gap = parse_usize(value, "ledger-gap")?;
+                cfg.claim_gap = parse_usize(value, "claim-gap")?;
+                i += 2;
+            }
+            "--claim-max" => {
+                let value = take_value(args, i)?;
+                cfg.claim_max_open = parse_usize(value, "claim-max")?;
+                i += 2;
+            }
+            "--claim-per-step" => {
+                let value = take_value(args, i)?;
+                cfg.claim_per_step = parse_usize(value, "claim-per-step")?;
+                i += 2;
+            }
+            "--claim-rent" => {
+                let value = take_value(args, i)?;
+                cfg.claim_rent = value.parse::<f32>()
+                    .map_err(|_| format!("invalid claim-rent '{value}'"))?;
+                i += 2;
+            }
+            "--claim-gain" => {
+                let value = take_value(args, i)?;
+                cfg.claim_verified_gain = value.parse::<f32>()
+                    .map_err(|_| format!("invalid claim-gain '{value}'"))?;
+                i += 2;
+            }
+            "--claim-cost" => {
+                let value = take_value(args, i)?;
+                cfg.claim_false_alarm_cost = value.parse::<f32>()
+                    .map_err(|_| format!("invalid claim-cost '{value}'"))?;
+                i += 2;
+            }
+            "--claim-probe" => {
+                let value = take_value(args, i)?;
+                cfg.claim_probe_per_step = parse_usize(value, "claim-probe")?;
+                i += 2;
+            }
+            "--claim-verify-floor" => {
+                let value = take_value(args, i)?;
+                cfg.claim_verify_floor = value.parse::<f32>()
+                    .map_err(|_| format!("invalid claim-verify-floor '{value}'"))?;
+                i += 2;
+            }
+            "--claim-fail-floor" => {
+                let value = take_value(args, i)?;
+                cfg.claim_fail_floor = value.parse::<f32>()
+                    .map_err(|_| format!("invalid claim-fail-floor '{value}'"))?;
                 i += 2;
             }
             other => return Err(format!("unknown argument '{other}'")),
@@ -151,6 +196,7 @@ fn parse_usize(s: &str, name: &str) -> Result<usize, String> {
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  esm run e1a [--stream same-token-context|role-sharing|delayed-role] \\\n                  [--encoder hash|competitive|predictive|d|...|e0|e1a|e1b|e1c] \\\n                  [--steps N] [--seed N] [--lr F]\n\n  esm run e1b [--encoder predictive] [--steps N] [--seed N] [--ledger-gap N]\n\nEncoders:\n  hash / a / control           Raw token/hash baseline\n  competitive / b               Sparse projection + homeostasis (v1)\n  predictive / c                Sparse + context-key role prototypes (v2)\n  d / d-full / d-no-trace / d-no-role-proto   Archived D-series\n  e0 / encoder-e0               Predictive + mean-pooled linear decoder\n  e1a / e1-attn-linear          Attention + linear readout (E1a)\n  e1b / e1-mean-mlp             Mean + one-hidden-layer MLP (E1b ablation)\n  e1c / e1-attn-mlp             Attention + one-hidden-layer MLP (E1c)\n  e2a / e2-credit-promote       Promote positive-credit features (E2a)\n  e2b / e2-credit-promote-suppress  Promote + suppress (E2b)\n  e2c / e2-no-loo               Uniform global-loss shaping (E2c)\n\nExamples:\n  esm run e1a --stream same-token-context --encoder hash --steps 10000\n  esm run e1a --stream role-sharing --encoder e1c --steps 10000 --lr 0.01\n  esm run e1a --stream role-sharing --encoder e2b --steps 10000\n  esm run e1b --encoder predictive --steps 50000 --ledger-gap 5"
+        "Usage:\n  esm run e1a [--stream same-token-context|role-sharing|delayed-role] \\\n                  [--encoder hash|competitive|predictive|d|...|e0|e1a|e1b|e1c] \\\n                  [--steps N] [--seed N] [--lr F]\n\n  esm run e1b [--encoder predictive] [--steps N] [--seed N] \\\n                  [--claim-gap N] [--claim-max N] [--claim-per-step N] \\\n                  [--claim-rent F] [--claim-gain F] [--claim-cost F]\n\nEncoders:\n  hash / a / control           Raw token/hash baseline\n  competitive / b               Sparse projection + homeostasis (v1)\n  predictive / c                Sparse + context-key role prototypes (v2)\n  context / ctx                 Context-dominant predictive (E-1B bridge)\n  composition / comp            Balanced + triple-interaction (E-1C)\n  d / d-full / d-no-trace / d-no-role-proto   Archived D-series\n  e0 / encoder-e0               Predictive + mean-pooled linear decoder\n  e1a / e1-attn-linear          Attention + linear readout (E1a)\n  e1b / e1-mean-mlp             Mean + one-hidden-layer MLP (E1b ablation)\n  e1c / e1-attn-mlp             Attention + one-hidden-layer MLP (E1c)\n  e2a / e2-credit-promote       Promote positive-credit features (E2a)\n  e2b / e2-credit-promote-suppress  Promote + suppress (E2b)\n  e2c / e2-no-loo               Uniform global-loss shaping (E2c)
+  composition / comp            Balanced + triple-interaction (E-1C)\n\nClaim args:\n  --claim-gap N       Gap between cue and verify steps (0=disable, default 0)\n  --claim-max N       Max open claims in pool (default 256)\n  --claim-per-step N  Max claims issued per step (default 8)\n  --claim-rent F      Rent per step for open claims (default 0.01)\n  --claim-gain F      Credit for verified claim (default 1.0)\n  --claim-cost F      Penalty for failed claim (default 0.5)\n\nExamples:\n  esm run e1a --stream same-token-context --encoder hash --steps 10000\n  esm run e1a --stream role-sharing --encoder e1c --steps 10000 --lr 0.01\n  esm run e1a --stream role-sharing --encoder e2b --steps 10000\n  esm run e1b --encoder context --stream fixed-context --steps 50000 --claim-gap 5"
     );
 }

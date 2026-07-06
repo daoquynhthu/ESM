@@ -7,6 +7,7 @@
 //!
 //! Encoders must not read `TargetEvent` during `encode`; target information is only used in `adapt`.
 
+pub mod composition;
 pub mod context;
 pub mod d;
 pub mod e;
@@ -114,6 +115,9 @@ pub enum EncoderKind {
     E2NoLoo,
     /// Context-dominant predictive encoder for E-1B bridge
     ContextPredictive,
+    /// Composition-depth encoder: balanced weights, triple interaction term (token^ctx^prev),
+    /// no usage homeostasis. Designed for Gate E-1C Composition Depth.
+    Composition,
 }
 
 impl EncoderKind {
@@ -133,6 +137,7 @@ impl EncoderKind {
             "e2-credit-promote-suppress" | "e2b" => Some(Self::E2CreditPromoteSuppress),
             "e2-no-loo" | "e2c" => Some(Self::E2NoLoo),
             "context-predictive" | "context" | "ctx" => Some(Self::ContextPredictive),
+            "composition" | "comp" => Some(Self::Composition),
             _ => None,
         }
     }
@@ -186,6 +191,9 @@ pub fn build_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Box<dyn SparseEnc
         EncoderKind::E2NoLoo => Box::new(EncoderE2c::new(cfg)),
         EncoderKind::ContextPredictive => {
             Box::new(context::ContextPredictiveEncoder::new(cfg))
+        }
+        EncoderKind::Composition => {
+            Box::new(composition::CompositionPredictiveEncoder::new(cfg))
         }
     }
 }

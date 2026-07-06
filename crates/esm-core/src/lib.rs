@@ -2,6 +2,7 @@
 //!
 //! This crate intentionally has no third-party dependencies. It is safe Rust only.
 
+pub mod claims;
 pub mod encoder;
 pub mod event;
 pub mod feature;
