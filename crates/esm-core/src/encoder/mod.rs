@@ -81,6 +81,17 @@ pub trait SparseEncoder {
     fn sparse_role_vote(&self, _code: &SparseCode) -> Option<(usize, f32)> {
         None
     }
+
+    /// Per-column role margin (best_count - second_best_count) for coverage
+    /// tracking. Used by E-1D GenesisManager. Empty vec means "not available".
+    fn column_role_margins(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// The feature offset used by this encoder (start of column FeatureIds).
+    fn feature_offset(&self) -> u32 {
+        0
+    }
 }
 
 /// Encoder kinds currently in service:
@@ -432,6 +443,19 @@ impl PredictiveEncoder {
 impl SparseEncoder for PredictiveEncoder {
     fn name(&self) -> &'static str {
         "predictive"
+    }
+
+    fn column_role_margins(&self) -> Vec<u32> {
+        self.role_counts_by_column.iter().map(|counts| {
+            let (best, second) = counts.iter().copied().fold((0u32, 0u32), |(b, s), c| {
+                if c > b { (c, b) } else if c > s { (b, c) } else { (b, s) }
+            });
+            best.saturating_sub(second)
+        }).collect()
+    }
+
+    fn feature_offset(&self) -> u32 {
+        self.base.feature_offset
     }
 
     fn sparse_role_vote(&self, code: &SparseCode) -> Option<(usize, f32)> {

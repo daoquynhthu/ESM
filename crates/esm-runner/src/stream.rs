@@ -531,3 +531,174 @@ impl SyntheticStream for CompositionDepthStream {
         (input, target)
     }
 }
+
+// =========================================================================
+// E-1D Genesis streams
+// =========================================================================
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum E1dStreamKind {
+    EmptyField,
+    NovelPattern,
+    RareEvent,
+}
+
+impl E1dStreamKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "empty-field" | "empty" => Some(Self::EmptyField),
+            "novel-pattern" | "novel" => Some(Self::NovelPattern),
+            "rare-event" | "rare" => Some(Self::RareEvent),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::EmptyField => "empty-field",
+            Self::NovelPattern => "novel-pattern",
+            Self::RareEvent => "rare-event",
+        }
+    }
+}
+
+pub fn build_e1d_stream(kind: E1dStreamKind, seed: u64) -> Box<dyn SyntheticStream> {
+    match kind {
+        E1dStreamKind::EmptyField => Box::new(E1dEmptyFieldStream::new(seed)),
+        E1dStreamKind::NovelPattern => Box::new(E1dNovelPatternStream::new(seed)),
+        E1dStreamKind::RareEvent => Box::new(E1dRareEventStream::new(seed)),
+    }
+}
+
+/// Every step is pure random noise. No structure to discover.
+/// Tests that genesis does not waste probes on noise.
+struct E1dEmptyFieldStream {
+    step: u64,
+    prev_token: u32,
+    rng: XorShift64,
+}
+
+impl E1dEmptyFieldStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for E1dEmptyFieldStream {
+    fn name(&self) -> &'static str { "empty-field" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let token = self.rng.next_usize(10000) as u32;
+        let context = self.rng.next_usize(10000) as u32;
+        let role = self.rng.next_usize(2) as u32;
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token: context,
+            position_mod: (self.step % 8) as u32,
+        };
+        let target = TargetEvent { latent_role: role, next_token: 0 };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+
+/// Phase 1 (burn_in steps): random noise. Phase 2: novel token→role mapping.
+/// Tests that genesis creates probes when novel structure appears.
+struct E1dNovelPatternStream {
+    step: u64,
+    prev_token: u32,
+    rng: XorShift64,
+}
+
+impl E1dNovelPatternStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for E1dNovelPatternStream {
+    fn name(&self) -> &'static str { "novel-pattern" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let burn_in = 5000u64;
+        let (token, context, role) = if self.step < burn_in {
+            // Phase 1: random noise
+            let token = self.rng.next_usize(10000) as u32;
+            let context = self.rng.next_usize(10000) as u32;
+            let role = self.rng.next_usize(2) as u32;
+            (token, context, role)
+        } else {
+            // Phase 2: novel pattern with fixed context
+            let token = if self.rng.next_usize(2) == 0 { 1000 } else { 1001 };
+            let context = 5000u32;
+            let role = if token == 1000 { 2 } else { 3 };
+            (token, context, role)
+        };
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token: context,
+            position_mod: (self.step % 8) as u32,
+        };
+        let target = TargetEvent { latent_role: role, next_token: 0 };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}
+
+/// 90% role 0 (token 100), 10% role 1 (token 101), delayed-cue 6-step cycle.
+/// Both cue and verify share the same context.
+/// Tests that probes survive for rare events.
+struct E1dRareEventStream {
+    step: u64,
+    prev_token: u32,
+    current_role: u32,
+    cycle_context: u32,
+    rng: XorShift64,
+}
+
+impl E1dRareEventStream {
+    fn new(seed: u64) -> Self {
+        Self { step: 0, prev_token: 0, current_role: 0, cycle_context: 0, rng: XorShift64::new(seed) }
+    }
+}
+
+impl SyntheticStream for E1dRareEventStream {
+    fn name(&self) -> &'static str { "rare-event" }
+
+    fn next_sample(&mut self) -> (InputEvent, TargetEvent) {
+        let phase = self.step % 6;
+        if phase == 0 {
+            // 90% role 0, 10% role 1
+            self.current_role = if self.rng.next_usize(10) == 0 { 1 } else { 0 };
+            self.cycle_context = self.rng.next_usize(4096) as u32;
+        }
+
+        let token = match phase {
+            0 => 100 + self.current_role,
+            1 | 2 | 3 | 4 => 200 + self.rng.next_usize(8) as u32,
+            _ => 300,
+        };
+        let context_token = match phase {
+            0 | 5 => 20000 + self.cycle_context,
+            _ => self.rng.next_usize(1024) as u32,
+        };
+
+        let input = InputEvent {
+            step: self.step,
+            token,
+            prev_token: self.prev_token,
+            context_token,
+            position_mod: phase as u32,
+        };
+        let target = TargetEvent { latent_role: self.current_role, next_token: 0 };
+        self.prev_token = token;
+        self.step += 1;
+        (input, target)
+    }
+}

@@ -118,6 +118,19 @@ impl SparseEncoder for ContextPredictiveEncoder {
         "context-predictive"
     }
 
+    fn column_role_margins(&self) -> Vec<u32> {
+        self.role_counts_by_column.iter().map(|counts| {
+            let (best, second) = counts.iter().copied().fold((0u32, 0u32), |(b, s), c| {
+                if c > b { (c, b) } else if c > s { (b, c) } else { (b, s) }
+            });
+            best.saturating_sub(second)
+        }).collect()
+    }
+
+    fn feature_offset(&self) -> u32 {
+        self.feature_offset
+    }
+
     fn sparse_role_vote(&self, code: &SparseCode) -> Option<(usize, f32)> {
         let mut votes = vec![0u32; self.max_roles];
         let mut total = 0u32;

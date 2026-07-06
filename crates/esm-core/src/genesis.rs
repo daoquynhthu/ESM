@@ -577,10 +577,8 @@ impl GenesisManager {
 
     /// 5. Call at end of step. Pays rent, promotes, retires.
     pub fn step_end(&mut self) {
-        let before_retired = self.store.total_retired;
         self.store.step_lifecycle();
-        let after_retired = self.store.total_retired;
-        self.total_retired = after_retired - before_retired;
+        self.total_retired = self.store.total_retired;
         self.total_promoted = self.store.total_promoted;
         self.total_activations = self.store.elements.iter()
             .filter(|e| e.last_activation == self.step)
